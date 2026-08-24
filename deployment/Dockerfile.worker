@@ -1,0 +1,46 @@
+FROM python:3.11-slim AS builder
+
+WORKDIR /build
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+
+RUN python -m venv /opt/venv && \
+    /opt/venv/bin/pip install --upgrade pip && \
+    /opt/venv/bin/pip install -r requirements.txt
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/opt/venv/bin:$PATH"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 appgroup \
+    && useradd --uid 10001 --gid appgroup --shell /usr/sbin/nologin --create-home appuser
+
+COPY --from=builder /opt/venv /opt/venv
+
+COPY --chown=appuser:appgroup src/ ./src/
+COPY --chown=appuser:appgroup alembic.ini ./alembic.ini
+COPY --chown=appuser:appgroup migrations/ ./migrations/
+COPY --chown=appuser:appgroup models/ ./models/
+
+# Training data and checkpoints are mounted read-write for the trainer queue.
+RUN mkdir -p /app/data/faces /app/models/checkpoints \
+    && chown -R appuser:appgroup /app/data /app/models/checkpoints
+
+USER appuser
+
+CMD ["celery", "-A", "src.workers.celery_app", "worker", "--loglevel=info"]

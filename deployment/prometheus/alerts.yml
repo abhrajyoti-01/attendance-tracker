@@ -1,0 +1,40 @@
+groups:
+  - name: attendance-api
+    rules:
+      - alert: ApiHighErrorRate
+        expr: |
+          sum(rate(http_requests_total{status_code=~"5.."}[5m]))
+            / sum(rate(http_requests_total[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "API 5xx rate above 5% for 5 minutes"
+
+      - alert: ApiHighLatency
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(http_request_duration_seconds_bucket[5m])) by (le)) > 2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p95 API latency above 2s"
+
+      - alert: RecognitionSpikeInSpoof
+        expr: |
+          sum(increase(liveness_checks_total{result="fail"}[15m]))
+            / clamp_min(sum(increase(liveness_checks_total[15m])), 1) > 0.3
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: ">30% of liveness checks failing - possible spoofing campaign or camera fault"
+
+      - alert: MatcherEmpty
+        expr: sum(matcher_index_size) < 1
+        for: 30m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Matcher index empty - recognition is non-functional"
