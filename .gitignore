@@ -18,7 +18,8 @@ htmlcov/
 !.env.example
 
 # Models & data (large/binary artifacts)
-models/exported/*.onnx
+models/exported/*
+!models/exported/.gitkeep
 models/checkpoints/
 data/raw/
 data/processed/
