@@ -1,6 +1,8 @@
 # Core ML/Deep Learning
-torch==2.1.0
-torchvision==0.16.0
+# torch/torchvision/Pillow ranges are constrained by facenet-pytorch==2.6.0
+# (torch>=2.2,<2.3, torchvision>=0.17,<0.18, Pillow>=10.2,<10.3).
+torch==2.2.2
+torchvision==0.17.2
 onnxruntime==1.16.0
 opencv-python==4.9.0.80
 numpy>=1.26.0,<2
@@ -9,7 +11,7 @@ albumentations==1.4.24
 facenet-pytorch==2.6.0
 mediapipe==0.10.11
 faiss-cpu==1.8.0
-pillow==10.4.0
+pillow==10.2.0
 
 # Web Framework
 fastapi==0.116.1
