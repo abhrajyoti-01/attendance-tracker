@@ -1,18 +1,45 @@
 # Attendance Tracker
 
+[![CI](https://github.com/abhrajyoti-01/attendance-tracker/actions/workflows/ci.yml/badge.svg)](https://github.com/abhrajyoti-01/attendance-tracker/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/abhrajyoti-01/attendance-tracker)](https://github.com/abhrajyoti-01/attendance-tracker/releases)
+[![License](https://img.shields.io/badge/license-not%20set-lightgrey)](#license)
+[![Python](https://img.shields.io/badge/python-3.11-blue)](https://www.python.org/)
+[![Tests](https://img.shields.io/badge/tests-69%20passing-brightgreen)](tests/)
+
 Production-grade, multi-tenant face recognition attendance system.
 
-FastAPI · SQLAlchemy 2 (async) · PostgreSQL · Redis · Celery · ONNX Runtime (FaceNet) · Docker
+FastAPI · SQLAlchemy 2 (async) · PostgreSQL · Redis · Celery · ONNX Runtime (FaceNet) · React + TypeScript · Docker
 
 ## What this is
 
-A backend that lets kiosks and cameras mark attendance by recognizing registered
-faces, with organization-level isolation, liveness anti-spoofing, audit trails,
-and operational tooling (migrations, metrics, health probes, background workers).
+A full-stack system that lets kiosks and cameras mark attendance by recognizing
+registered faces, with organization-level isolation, liveness anti-spoofing,
+audit trails, and operational tooling (migrations, metrics, health probes,
+background workers) — plus an admin dashboard with a real-time event feed.
 
 **Recognition model:** FaceNet InceptionResnetV1 pretrained on VGGFace2,
 exported to ONNX (512-dim L2-normalized embeddings). Optional per-organization
 fine-tuning via a batch-hard triplet pipeline (`src/training/`).
+
+## Features
+
+- **Face recognition attendance** — MTCNN detection, quality-gated enrollment,
+  512-d embeddings, per-organization in-memory cosine/FAISS matching.
+- **Liveness anti-spoofing** — LBP texture, blink and head-movement checks that
+  fail closed and record spoof attempts.
+- **Multi-tenancy** — every query and match index is scoped by organization;
+  cross-org access returns 404.
+- **Auth** — JWT access tokens + rotating refresh tokens with theft detection;
+  revocable access tokens; HMAC-hashed, scoped API keys for kiosks.
+- **Admin dashboard** — React + TypeScript SPA: overview charts, live SSE feed,
+  user/department management, organization settings, dark mode, WCAG AA.
+- **Operations** — Alembic migrations with startup schema verification,
+  Prometheus metrics, structured JSON logs with correlation IDs, Celery beat
+  maintenance, Docker Compose stack with healthchecks.
+
+## Screenshots
+
+> Add screenshots of the sign-in page, overview dashboard and live feed here.
 
 ## Repository layout
 
@@ -224,4 +251,15 @@ lowered below `MATCH_THRESHOLD_FLOOR`.
   realistically dozens of identities for measurable gains over VGGFace2 base.
 - **Access tokens are revocable via `users.token_version`.** Logout, password
   change and admin reset bump it, so outstanding tokens fail immediately.
+- **Face images are not persisted.** `face_images` and
+  `spoof_attempts.snapshot_key` are reserved but never written; only the
+  aggregated embedding is stored. MinIO holds export files only.
+- **The Docker stack was not exercised end-to-end** in this environment
+  (no Docker available); it is verified by linting, the SQLite-backed test
+  suite and type-checked builds.
+
+## License
+
+No license has been set for this repository. Until one is added, all rights are
+reserved by the author and the code may not be reused or redistributed.
 

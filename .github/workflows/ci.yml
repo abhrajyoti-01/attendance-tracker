@@ -26,7 +26,8 @@ jobs:
     env:
       JWT_SECRET: ci-test-secret-value-that-is-at-least-32-characters
       RATE_LIMIT_ENABLED: "false"
-      DATABASE_URL: sqlite+aiosqlite:///:memory:
+      # Quoted: an unquoted colon in this value makes the workflow unparseable.
+      DATABASE_URL: "sqlite+aiosqlite:///:memory:"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
