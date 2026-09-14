@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/abhrajyoti-01/attendance-tracker/actions/workflows/ci.yml/badge.svg)](https://github.com/abhrajyoti-01/attendance-tracker/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/abhrajyoti-01/attendance-tracker)](https://github.com/abhrajyoti-01/attendance-tracker/releases)
-[![License](https://img.shields.io/badge/license-not%20set-lightgrey)](#license)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11-blue)](https://www.python.org/)
 [![Tests](https://img.shields.io/badge/tests-69%20passing-brightgreen)](tests/)
 
@@ -36,10 +36,6 @@ fine-tuning via a batch-hard triplet pipeline (`src/training/`).
 - **Operations** — Alembic migrations with startup schema verification,
   Prometheus metrics, structured JSON logs with correlation IDs, Celery beat
   maintenance, Docker Compose stack with healthchecks.
-
-## Screenshots
-
-> Add screenshots of the sign-in page, overview dashboard and live feed here.
 
 ## Repository layout
 
@@ -260,6 +256,32 @@ lowered below `MATCH_THRESHOLD_FLOOR`.
 
 ## License
 
-No license has been set for this repository. Until one is added, all rights are
-reserved by the author and the code may not be reused or redistributed.
+Copyright 2026 Abhra (https://github.com/abhrajyoti-01)
+
+Licensed under the **Apache License, Version 2.0** — see [LICENSE](LICENSE).
+
+You may use, modify and distribute this software, including for commercial
+purposes, provided you:
+
+- include a copy of the license,
+- state significant changes you made to the files, and
+- retain the copyright, attribution and NOTICE notices.
+
+The license also grants a patent license and requires that attribution to the
+original author be preserved. It does **not** grant rights to use the project's
+name or trademarks.
+
+```
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+```
 
