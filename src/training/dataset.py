@@ -81,8 +81,8 @@ class IdentityDataset(Dataset):
         if face is None:
             raise ValueError(f"No face found in {image_path}")
 
-        # detect() returns float [0..1] HWC RGB
-        crop_uint8 = np.clip(face * 255.0, 0, 255).astype(np.uint8)
+        # detect() returns a uint8 HWC RGB crop in [0, 255]
+        crop_uint8 = np.ascontiguousarray(face, dtype=np.uint8)
 
         if self.cache_dir is not None:
             np.save(self._crop_cache_path(image_path), crop_uint8)

@@ -14,9 +14,10 @@ logger = structlog.get_logger(__name__)
 class EmbeddingEngine:
     """ONNX face embedding inference.
 
-    Expects pre-cropped 160x160 RGB faces (as produced by FaceDetector.detect).
-    Input pixels may be uint8 [0..255] or float [0..1]; standardization
-    ((x/255 or x) - mean) / std is applied here exactly once.
+    Expects pre-cropped 160x160 RGB faces. ``FaceDetector.detect`` returns
+    uint8 [0..255]; float [0..1] is also tolerated. Standardization
+    ``((x/255 or x) - 0.5) / 0.5`` is applied here exactly once, matching
+    ``scripts/export_pretrained_onnx.py`` which does not bake it into the graph.
     """
 
     def __init__(
@@ -77,20 +78,31 @@ class EmbeddingEngine:
         )
 
     def _preprocess(self, batch_hwcr: np.ndarray) -> np.ndarray:
-        """batch of HWC RGB faces -> standardized NCHW float32."""
+        """Batch of HWC RGB faces -> standardized NCHW float32.
+
+        Accepts uint8 [0..255] or float [0..1] input and applies
+        ``(x - 0.5) / 0.5`` exactly once. FaceDetector emits uint8, so the
+        common path is the ``/255`` branch.
+
+        The result is forced C-contiguous: ``transpose`` returns a view and
+        ``.astype`` preserves the strided layout, which makes ONNX Runtime 1.16
+        crash on Windows (access violation) when the tensor is fed in directly.
+        """
         x = batch_hwcr.astype(np.float32, copy=True)
         if x.max(initial=0.0) > 1.5:  # uint8-style input
             x /= 255.0
         x = (x - 0.5) / 0.5
-        return x.transpose(0, 3, 1, 2).astype(np.float32)
+        return np.ascontiguousarray(x.transpose(0, 3, 1, 2), dtype=np.float32)
 
     def _run(self, standardized_nchw: np.ndarray) -> np.ndarray:
+        if not standardized_nchw.flags["C_CONTIGUOUS"]:
+            standardized_nchw = np.ascontiguousarray(standardized_nchw, dtype=np.float32)
         outputs = self.session.run([self.output_name], {self.input_name: standardized_nchw})[0]
         norms = np.linalg.norm(outputs, axis=1, keepdims=True)
         return (outputs / (norms + 1e-10)).astype(np.float32)
 
     def compute(self, faces: np.ndarray) -> np.ndarray:
-        """Compute embeddings for a single face (HWC) or a batch (NHWC), RGB."""
+        """Compute embeddings for a single face (HWC) or a batch (NHWC), RGB uint8."""
         if faces.ndim == 3:
             faces = faces[np.newaxis, ...]
 

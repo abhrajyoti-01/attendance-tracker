@@ -3,7 +3,10 @@ from pydantic import BaseModel, Field
 
 class RecognizeRequest(BaseModel):
     image_base64: str = Field(min_length=1)
-    threshold: float = Field(default=0.55, ge=0.0, le=1.0)
+    # Optional short burst of extra frames (same person, same session) used to
+    # evaluate blink/head-movement. Without it, only static texture is judged.
+    liveness_frames_base64: list[str] = Field(default_factory=list, max_length=30)
+    threshold: float | None = Field(default=None, ge=0.0, le=1.0)
     check_liveness: bool = Field(default=True)
     auto_mark_attendance: bool = Field(default=False)
 
@@ -22,7 +25,7 @@ class RecognizeResponse(BaseModel):
 
 class BatchRecognizeRequest(BaseModel):
     images_base64: list[str] = Field(min_length=1, max_length=10)
-    threshold: float = Field(default=0.55, ge=0.0, le=1.0)
+    threshold: float | None = Field(default=None, ge=0.0, le=1.0)
     check_liveness: bool = Field(default=True)
 
 

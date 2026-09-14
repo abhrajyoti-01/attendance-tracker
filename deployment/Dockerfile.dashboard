@@ -2,8 +2,9 @@
 # behind a minimal nginx that proxies /api to the FastAPI service.
 FROM node:22-alpine AS build
 WORKDIR /app
-COPY dashboard/package.json dashboard/package-lock.json* ./
-RUN npm install --no-fund --no-audit
+COPY dashboard/package.json dashboard/package-lock.json ./
+# npm ci (not install) so the lockfile is authoritative and reproducible.
+RUN npm ci --no-fund --no-audit
 COPY dashboard/ ./
 RUN npm run build
 

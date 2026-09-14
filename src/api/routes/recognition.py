@@ -33,6 +33,7 @@ from src.preprocessing.face_detector import FaceDetectorLazy
 from src.preprocessing.quality_checker import QualityChecker
 from src.services.attendance_service import mark_attendance
 from src.services.audit import record_audit
+from src.services.org_settings import load_org_settings
 from src.utils.logger import get_logger
 
 router = APIRouter()
@@ -42,6 +43,13 @@ MAX_IMAGE_PIXELS = 4096 * 4096
 
 
 def decode_base64_image(base64_str: str) -> np.ndarray:
+    max_b64_len = ((settings.api.max_upload_size + 2) // 3) * 4 + 64
+    if len(base64_str) > max_b64_len:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Image payload exceeds {settings.api.max_upload_size} bytes",
+        )
+
     if "," in base64_str:
         base64_str = base64_str.split(",", 1)[1]
 
@@ -54,6 +62,12 @@ def decode_base64_image(base64_str: str) -> np.ndarray:
 
     if not image_data:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Empty image payload")
+
+    if len(image_data) > settings.api.max_upload_size:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Image payload exceeds {settings.api.max_upload_size} bytes",
+        )
 
     buffer = np.frombuffer(image_data, dtype=np.uint8)
     image = cv2.imdecode(buffer, cv2.IMREAD_COLOR)
@@ -68,6 +82,13 @@ def decode_base64_image(base64_str: str) -> np.ndarray:
         )
 
     return cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+
+def _run_liveness(
+    detector, frames: list[np.ndarray], threshold: float | None = None
+) -> tuple[bool, str, float]:
+    detector.reset()
+    return detector.check(frames, threshold=threshold)
 
 
 def _no_match_response(
@@ -114,6 +135,9 @@ async def recognize(
 
     image = decode_base64_image(request.image_base64)
 
+    org_settings = await load_org_settings(db, requester.organization_id)
+    check_liveness = request.check_liveness and bool(org_settings["require_liveness_check"])
+
     face_detector = FaceDetectorLazy.get_instance()
     detected_face = face_detector.detect(image)
     if detected_face is None:
@@ -124,12 +148,23 @@ async def recognize(
     liveness_score = 1.0
     liveness_details = "live"
 
-    if request.check_liveness:
+    if check_liveness:
         from src.anti_spoofing.liveness import LivenessDetectorLazy
 
+        liveness_frames = [detected_face]
+        for extra in request.liveness_frames_base64:
+            try:
+                extra_image = decode_base64_image(extra)
+            except HTTPException:
+                continue
+            extra_face = face_detector.detect(extra_image)
+            if extra_face is not None:
+                liveness_frames.append(extra_face)
+
         detector = LivenessDetectorLazy.get_instance()
-        detector.reset()
-        is_live, liveness_details, liveness_score = detector.check(detected_face)
+        is_live, liveness_details, liveness_score = _run_liveness(
+            detector, liveness_frames, float(org_settings["liveness_threshold"])
+        )
         liveness_checks_total.labels(result="pass" if is_live else "fail").inc()
 
         if not is_live:
@@ -149,18 +184,25 @@ async def recognize(
     embedding = embedding_engine.compute_single(detected_face)
     model_inferences_total.labels(status="ok").inc()
 
-    threshold = max(request.threshold, settings.model.intra_org_threshold_floor)
+    requested_threshold = (
+        request.threshold
+        if request.threshold is not None
+        else float(org_settings["recognition_threshold"])
+    )
+    threshold = max(requested_threshold, settings.model.intra_org_threshold_floor)
 
     matcher = await matcher_registry.get_matcher(org_id)
     result = matcher.match(embedding, threshold=threshold) if matcher else None
 
     if result is not None:
         matched_user_id, confidence = result
+        matched_uuid: UUID | None
         try:
             matched_uuid = UUID(matched_user_id)
         except (ValueError, TypeError):
             matched_uuid = None
 
+        user = None
         if matched_uuid is not None:
             user_result = await db.execute(
                 select(User).where((User.id == matched_uuid) & (User.is_active.is_(True)))
@@ -207,34 +249,64 @@ async def batch_recognize(
     requester: RequesterContext = Depends(authenticate_requester),
     db: AsyncSession = Depends(get_db),
 ):
-    start_time = time.perf_counter()
     org_id = str(requester.organization_id)
 
     face_detector = FaceDetectorLazy.get_instance()
     embedding_engine = EmbeddingEngineLazy.get_instance()
     matcher = await matcher_registry.get_matcher(org_id)
 
+    org_settings = await load_org_settings(db, requester.organization_id)
+    check_liveness = request.check_liveness and bool(org_settings["require_liveness_check"])
+
+    requested_threshold = (
+        request.threshold
+        if request.threshold is not None
+        else float(org_settings["recognition_threshold"])
+    )
+    threshold = max(requested_threshold, settings.model.intra_org_threshold_floor)
+
     results: list[RecognizeResponse] = []
     matched_count = 0
 
     for img_base64 in request.images_base64:
+        item_start = time.perf_counter()
         try:
             image = decode_base64_image(img_base64)
         except HTTPException:
-            results.append(_no_match_response(start_time, liveness_details="invalid_image"))
+            results.append(_no_match_response(item_start, liveness_details="invalid_image"))
             continue
 
         detected_face = face_detector.detect(image)
         if detected_face is None:
-            results.append(_no_match_response(start_time, liveness_details="no_face_detected"))
+            results.append(_no_match_response(item_start, liveness_details="no_face_detected"))
             continue
 
+        if check_liveness:
+            from src.anti_spoofing.liveness import LivenessDetectorLazy
+
+            detector = LivenessDetectorLazy.get_instance()
+            is_live, liveness_details, liveness_score = _run_liveness(
+                detector, [detected_face], float(org_settings["liveness_threshold"])
+            )
+            liveness_checks_total.labels(result="pass" if is_live else "fail").inc()
+            if not is_live:
+                await _record_spoof_attempt(
+                    db, requester.organization_id, liveness_details, liveness_score
+                )
+                results.append(
+                    _no_match_response(
+                        item_start,
+                        is_live=False,
+                        liveness_score=liveness_score,
+                        liveness_details=liveness_details or "liveness_failed",
+                    )
+                )
+                continue
+        else:
+            is_live, liveness_details, liveness_score = True, "live", 1.0
+
         embedding = embedding_engine.compute_single(detected_face)
-        result = (
-            matcher.match(embedding, threshold=settings.model.match_threshold_default)
-            if matcher
-            else None
-        )
+        result = matcher.match(embedding, threshold=threshold) if matcher else None
 
         if result is not None:
             matched_user_id, confidence = result
@@ -243,29 +315,39 @@ async def batch_recognize(
             except (ValueError, TypeError):
                 matched_uuid = None
 
+            user = None
             if matched_uuid is not None:
                 user_result = await db.execute(
                     select(User).where((User.id == matched_uuid) & (User.is_active.is_(True)))
                 )
                 user = user_result.scalar_one_or_none()
-                if user is not None:
-                    matched_count += 1
-                    results.append(
-                        RecognizeResponse(
-                            matched=True,
-                            user_id=str(user.id),
-                            name=user.name,
-                            external_id=user.external_id,
-                            confidence=round(float(confidence), 4),
-                            is_live=True,
-                            liveness_score=1.0,
-                            liveness_details="live",
-                            processing_time_ms=round((time.perf_counter() - start_time) * 1000, 2),
-                        )
-                    )
-                    continue
 
-        results.append(_no_match_response(start_time, liveness_details="no_match"))
+            if (
+                matched_uuid is not None
+                and user is not None
+                and user.organization_id == requester.organization_id
+            ):
+                matched_count += 1
+                results.append(
+                    RecognizeResponse(
+                        matched=True,
+                        user_id=str(user.id),
+                        name=user.name,
+                        external_id=user.external_id,
+                        confidence=round(float(confidence), 4),
+                        is_live=is_live,
+                        liveness_score=liveness_score,
+                        liveness_details=liveness_details,
+                        processing_time_ms=round((time.perf_counter() - item_start) * 1000, 2),
+                    )
+                )
+                continue
+
+        results.append(
+            _no_match_response(
+                item_start, liveness_score=liveness_score, liveness_details="no_match"
+            )
+        )
 
     return BatchRecognizeResponse(
         results=results,
@@ -312,7 +394,7 @@ async def register_user_face(
             rejected["no_face"] += 1
             continue
 
-        face_uint8 = np.clip(detected_face * 255.0, 0, 255).astype(np.uint8)
+        face_uint8 = detected_face
         quality = quality_checker.check(face_uint8)
         if not quality["valid"]:
             rejected["low_quality"] += 1

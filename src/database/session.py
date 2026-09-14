@@ -36,9 +36,15 @@ async_session_maker = async_sessionmaker(
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
+    """Request-scoped unit of work.
+
+    Commits on clean exit so any rows added without an explicit commit (audit
+    entries in particular) are persisted, and rolls back if the handler raised.
+    """
     async with async_session_maker() as session:
         try:
             yield session
+            await session.commit()
         except Exception:
             await session.rollback()
             raise
@@ -49,6 +55,7 @@ async def get_db_context() -> AsyncGenerator[AsyncSession, None]:
     async with async_session_maker() as session:
         try:
             yield session
+            await session.commit()
         except Exception:
             await session.rollback()
             raise

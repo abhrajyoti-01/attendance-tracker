@@ -3,6 +3,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import torch
 from facenet_pytorch import MTCNN
 from PIL import Image
 
@@ -34,12 +35,25 @@ class FaceDetector:
             thresholds=thresholds,
             factor=factor,
             keep_all=keep_all,
+            post_process=False,
             device=device,
         )
 
         self._lock = threading.Lock()
 
+    @staticmethod
+    def _to_uint8_hwc(face: "torch.Tensor") -> np.ndarray:
+        """MTCNN CHW tensor (float [0..255] with post_process=False) -> uint8 HWC RGB."""
+        arr = face.detach().to("cpu").permute(1, 2, 0).clamp(0, 255).round().numpy()
+        return np.ascontiguousarray(arr, dtype=np.uint8)
+
     def detect(self, image: np.ndarray) -> np.ndarray | None:
+        """Detect the largest face and return a 160x160 RGB **uint8** crop.
+
+        Pixels are in [0, 255]. Every downstream consumer (liveness, quality
+        checks, exports) and the EmbeddingEngine depend on this contract; the
+        engine applies ``(x/255 - 0.5) / 0.5`` exactly once.
+        """
         with self._lock:
             image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             image_pil = Image.fromarray(image_rgb)
@@ -47,25 +61,34 @@ class FaceDetector:
             face = self.mtcnn(image_pil, return_prob=False)
 
             if face is not None:
-                return np.array(face).transpose(1, 2, 0)
+                return self._to_uint8_hwc(face)
             return None
 
     def detect_multiple(
         self, image: np.ndarray
     ) -> tuple[list[np.ndarray], list[float], list[tuple[int, int, int, int]]]:
+        """Detect all faces, returning RGB uint8 crops in [0, 255]."""
         with self._lock:
             image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             image_pil = Image.fromarray(image_rgb)
 
             faces, probs, boxes = self.mtcnn.detect(image_pil, landmarks=True)
 
-            if faces is not None:
-                faces_list = [f.permute(1, 2, 0).numpy() for f in faces]
-                probs_list = [float(p) for p in probs] if probs is not None else [1.0] * len(faces)
-                boxes_list = [tuple(map(int, b)) for b in boxes] if boxes is not None else []
-                return faces_list, probs_list, boxes_list
+            if faces is None or boxes is None:
+                return [], [], []
 
-            return [], [], []
+            crops: list[np.ndarray] = []
+            for box in boxes:
+                try:
+                    crop = self.mtcnn.extract(image_pil, [box], save_path=None)
+                except Exception:
+                    continue
+                if crop is not None and len(crop) > 0:
+                    crops.append(self._to_uint8_hwc(crop[0]))
+
+            probs_list = [float(p) for p in probs] if probs is not None else [1.0] * len(crops)
+            boxes_list = [tuple(map(int, b)) for b in boxes]
+            return crops, probs_list, boxes_list
 
     def align_and_crop(self, image: np.ndarray, landmarks: np.ndarray) -> np.ndarray:
         left_eye = landmarks[0]
@@ -130,9 +153,7 @@ class FaceDetector:
         if face is None:
             return False
 
-        face_uint8 = (face * 255).astype(np.uint8)
-        face_rgb = cv2.cvtColor(face_uint8, cv2.COLOR_RGB2BGR)
-        cv2.imwrite(str(output_path), face_rgb)
+        cv2.imwrite(str(output_path), cv2.cvtColor(face, cv2.COLOR_RGB2BGR))
         return True
 
     def is_face_present(self, image: np.ndarray, min_prob: float = 0.9) -> tuple[bool, float]:

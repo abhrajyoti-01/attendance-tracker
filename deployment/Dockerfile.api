@@ -27,6 +27,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     libgl1 \
     libglib2.0-0 \
+    libgomp1 \
+    libsm6 \
+    libxext6 \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 appgroup \
     && useradd --uid 10001 --gid appgroup --shell /usr/sbin/nologin --create-home appuser

@@ -208,7 +208,7 @@ async def list_users(
     is_active: bool | None = None,
     is_registered: bool | None = None,
     pagination: PaginationParams = Depends(),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_org_admin_user),
     db: AsyncSession = Depends(get_db),
 ):
     query = (
@@ -288,6 +288,19 @@ async def _get_scoped_user(
     return result.scalar_one_or_none()
 
 
+def _assert_can_manage_target(requester: User, target: User) -> None:
+    """A non-superadmin may never act on a superadmin, even in their own org.
+
+    Bootstrap places the superadmin inside an organization, so without this an
+    org admin could reset their password or deactivate them.
+    """
+    if target.is_superadmin and not requester.is_superadmin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Cannot manage a superadmin account",
+        )
+
+
 @router.get("/{user_id}", response_model=UserResponse)
 async def get_user(
     user_id: UUID,
@@ -333,6 +346,7 @@ async def update_user(
     user = await _get_scoped_user(user_id, current_user, db)
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    _assert_can_manage_target(current_user, user)
 
     changes: dict = {}
     if user_data.name is not None:
@@ -442,6 +456,7 @@ async def delete_user(
     user = await _get_scoped_user(user_id, current_user, db)
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    _assert_can_manage_target(current_user, user)
 
     was_active_with_embedding = user.is_active and user.embedding is not None
     user.is_active = False
@@ -474,6 +489,29 @@ async def bulk_import_users(
     imported = 0
     errors: list[dict] = []
 
+    if import_data.role == "superadmin" and not current_user.is_superadmin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only a superadmin can create superadmin accounts",
+        )
+    if current_user.role == "org_admin" and import_data.role == "org_admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Organization admins cannot create additional admins",
+        )
+
+    org_result = await db.execute(
+        select(Organization).where(Organization.id == current_user.organization_id)
+    )
+    org = org_result.scalar_one_or_none()
+    if org is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Organization not found")
+
+    count_result = await db.execute(
+        select(func.count(User.id)).where(User.organization_id == current_user.organization_id)
+    )
+    remaining_slots = max(0, org.max_users - (count_result.scalar() or 0))
+
     if import_data.department_id is not None:
         dept = await db.execute(
             select(Department.id).where(
@@ -491,6 +529,16 @@ async def bulk_import_users(
         external_key = item.external_id.strip() if item.external_id else ""
         email_key = item.email.lower() if item.email else ""
 
+        if imported >= remaining_slots:
+            errors.append(
+                {
+                    "row": index,
+                    "name": item.name,
+                    "error": f"Organization user limit reached ({org.max_users})",
+                }
+            )
+            continue
+
         if external_key and external_key in seen_external:
             errors.append(
                 {"row": index, "name": item.name, "error": "Duplicate external_id in request"}
@@ -499,11 +547,6 @@ async def bulk_import_users(
         if email_key and email_key in seen_email:
             errors.append({"row": index, "name": item.name, "error": "Duplicate email in request"})
             continue
-
-        if external_key:
-            seen_external.add(external_key)
-        if email_key:
-            seen_email.add(email_key)
 
         try:
             async with db.begin_nested():
@@ -519,8 +562,11 @@ async def bulk_import_users(
                 db.add(new_user)
                 await db.flush()
             imported += 1
+            if external_key:
+                seen_external.add(external_key)
+            if email_key:
+                seen_email.add(email_key)
         except Exception as exc:
-            db.rollback()
             errors.append({"row": index, "name": item.name, "error": type(exc).__name__})
 
     await db.commit()
@@ -553,6 +599,7 @@ async def set_user_password(
     user = await _get_scoped_user(user_id, current_user, db)
     if user is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="User not found")
+    _assert_can_manage_target(current_user, user)
 
     is_strong, message = validate_password_strength(request.new_password)
     if not is_strong:

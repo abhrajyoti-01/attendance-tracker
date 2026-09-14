@@ -3,12 +3,15 @@ name = "attendance-tracker"
 version = "1.0.0"
 description = "Production-grade face recognition attendance system"
 requires-python = ">=3.11"
+# NOTE: requirements.txt is the authoritative, fully pinned install spec
+# (including celery, redis, bcrypt, python-jose, scikit-image and faiss, which
+# are omitted here to avoid drift). These ranges exist for editable installs.
 dependencies = [
-    "torch>=2.2.0",
-    "torchvision>=0.17.0",
-    "onnxruntime>=1.17.0",
+    "torch>=2.2.0,<2.3",
+    "torchvision>=0.17.0,<0.18",
+    "onnxruntime>=1.16.0,<1.19",
     "opencv-python>=4.9.0",
-    "numpy>=1.26.0",
+    "numpy>=1.26.0,<2",
     "fastapi>=0.110.0",
     "uvicorn[standard]>=0.27.0",
     "gunicorn>=21.2.0",
@@ -17,14 +20,14 @@ dependencies = [
     "alembic>=1.13.0",
     "redis[hiredis]>=5.0.0",
     "celery[redis]>=5.3.0",
-    "albumentations>=1.4.0",
-    "facenet-pytorch>=2.6.0",
-    "mediapipe>=0.10.8",
+    "facenet-pytorch>=2.6.0,<2.7",
+    "mediapipe>=0.10.8,<0.11",
     "python-multipart>=0.0.9",
-    "pillow>=10.2.0",
-    "python-jose[cryptography]>=3.3.0",
-    "passlib[bcrypt]>=1.7.4",
+    "pillow>=10.2.0,<10.3",
+    "python-jose[cryptography]>=3.4.0",
+    "bcrypt>=4.1.0",
     "pydantic[email]>=2.6.0",
+    "pydantic-settings>=2.0.0",
     "python-dotenv>=1.0.0",
     "structlog>=24.1.0",
     "prometheus-client>=0.19.0",
@@ -32,6 +35,7 @@ dependencies = [
     "pandas>=2.2.0",
     "openpyxl>=3.1.0",
     "httpx>=0.27.0",
+    "aiosmtplib>=3.0.0",
     "faiss-cpu>=1.8.0",
     "scikit-image>=0.22.0",
 ]
@@ -41,7 +45,18 @@ dev = [
     "ruff>=0.1.0",
     "mypy>=1.8.0",
     "pre-commit>=3.6.0",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=5.0.0",
+    "aiosqlite>=0.20.0",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = ["ignore::DeprecationWarning:passlib.*"]
+markers = ["ml: requires the exported ONNX model / torch / MediaPipe"]
+addopts = "-q"
 
 [tool.ruff]
 line-length = 100

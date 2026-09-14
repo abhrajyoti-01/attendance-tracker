@@ -11,13 +11,13 @@ The Attendance Tracker is a multi-tenant, production-grade face recognition atte
               ┌───────────────┴───────────────┐
               │                               │
     FastAPI Server(s)                  React Dashboard
-    (gunicorn + uvicorn)               (planned)
+    (uvicorn, N workers)               (nginx-served SPA)
               │
    ┌──────────┼──────────┐
    │          │          │
 PostgreSQL   Redis    MinIO / S3
-(primary)  (cache,     (face images)
-           broker)
+(primary)  (cache,     (exports; face images
+           broker)     are not persisted)
               │
    ┌──────────┴──────────┐
    │    Celery Workers    │
@@ -32,7 +32,7 @@ PostgreSQL   Redis    MinIO / S3
    │ (webcam) │  │ (IP cam) │
    └────┬─────┘  └────┬─────┘
         └──────────────┘
-              │ HTTP/WebSocket
+              │ HTTP (REST + SSE live feed)
 ```
 
 ## Key Design Decisions
@@ -41,7 +41,7 @@ PostgreSQL   Redis    MinIO / S3
 |-----------|--------|-----------|
 | **Database** | PostgreSQL 15+ | MVCC, concurrent writes, JSONB, partitioning support |
 | **Cache/Broker** | Redis 7+ | Embedding cache, rate-limit counters, Celery broker, pub/sub |
-| **File Storage** | MinIO (dev) / S3 (prod) | Face images stored separately from DB |
+| **File Storage** | MinIO (dev) / S3 (prod) | Attendance export files; face images are not persisted |
 | **Background Tasks** | Celery + Redis | Async embedding computation, training jobs, report generation |
 | **ML Inference** | ONNX Runtime | 2-3x faster CPU inference vs PyTorch, cross-platform |
 | **Vector Search** | FAISS (optional) | IVF-PQ for 100K+ vectors, sub-millisecond nearest-neighbor |
@@ -53,23 +53,28 @@ PostgreSQL   Redis    MinIO / S3
 
 ```
 Webcam Frame (640x480)
-  → Face Detection (MTCNN, every 3rd frame)
-  → Quality Check (blur, lighting, face size)
-  → Anti-Spoofing (blink detection, head movement, texture analysis)
-  → Align & Crop (160x160)
-  → ONNX Inference → 128-d embedding
-  → Cosine/FAISS Match vs cached embeddings
+  → Face Detection (MTCNN) → 160x160 RGB uint8 crop
+  → Quality Check (sharpness, brightness, contrast, face size)
+  → Anti-Spoofing (texture from one frame; blink/head movement from a frame burst)
+  → ONNX Inference → 512-d L2-normalized embedding
+  → Cosine/FAISS Match vs per-organization cached embeddings
   → Score > threshold? → Identify user or mark unknown
 ```
+
+``FaceDetector.detect`` returns a **uint8 RGB** crop in [0, 255] and
+``EmbeddingEngine`` applies ``(x/255 - 0.5) / 0.5`` exactly once, matching the
+exported graph (see `scripts/export_pretrained_onnx.py`). Liveness is temporal:
+blink and head-movement require several frames, so a single-frame request is
+scored only on static texture. Send `liveness_frames_base64` for the full check.
 
 ### Attendance Marking Flow
 
 ```
 Recognition result
-  → Debounce check (last marked < 10 min? skip)
-  → POST /api/attendance
+  → Dedupe check (last marked inside the window? skip)
+  → POST /api/attendance  (or auto-mark on /api/recognize)
   → DB insert (PostgreSQL)
-  → SSE broadcast to dashboard
+  → SSE broadcast to dashboard (/api/dashboard/stream)
 ```
 
 ## Directory Structure
@@ -93,7 +98,7 @@ attendance_tracker/
 ├── data/                    # Raw, processed, and pretraining images
 ├── models/                  # Model checkpoints, exported ONNX files
 ├── docs/                    # Documentation
-└── dashboard/               # React frontend (planned)
+└── dashboard/               # React frontend (React 18 + Vite, nginx-served)
 ```
 
 ## Multi-Tenancy

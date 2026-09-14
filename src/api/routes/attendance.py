@@ -87,7 +87,8 @@ async def mark_attendance_endpoint(
 
     matches_total.labels(result="attendance_marked" if created else "deduplicated").inc()
 
-    return _row_to_response(record, user, {})
+    dept_map = await _dept_name_map(db, api_key.organization_id)
+    return _row_to_response(record, user, dept_map)
 
 
 @router.post("/manual", status_code=status.HTTP_201_CREATED)
@@ -321,19 +322,26 @@ async def get_attendance_stats(
     )
 
 
-def _build_export_dataframe(rows, include_metadata: bool) -> pd.DataFrame:
+def _build_export_dataframe(
+    rows, include_metadata: bool, department_names: dict | None = None
+) -> pd.DataFrame:
+    from src.services.export_safety import sanitize_cell
+
+    department_names = department_names or {}
     data = [
         {
             "ID": str(att.id),
-            "User": user.name if user else "Unknown",
-            "External ID": user.external_id if user else "",
-            "Department": "",
+            "User": sanitize_cell(user.name if user else "Unknown"),
+            "External ID": sanitize_cell(user.external_id if user else ""),
+            "Department": sanitize_cell(
+                department_names.get(user.department_id, "") if user else ""
+            ),
             "Timestamp": att.timestamp.isoformat(),
             "Method": att.method,
             "Confidence": f"{att.confidence:.3f}" if att.confidence is not None else "",
-            "Device": att.device_id or "",
+            "Device": sanitize_cell(att.device_id or ""),
             "Is Spoof": "Yes" if att.is_spoof else "No",
-            **({"Metadata": str(att.metadata_)} if include_metadata else {}),
+            **({"Metadata": sanitize_cell(att.metadata_)} if include_metadata else {}),
         }
         for att, user in ((row[0], row[1]) for row in rows)
     ]
@@ -399,7 +407,17 @@ async def export_attendance(
             detail="Result too large for synchronous export; use the asynchronous export job",
         )
 
-    df = _build_export_dataframe(rows, request.include_metadata)
+    department_names: dict = {}
+    dept_ids = {row[1].department_id for row in rows if row[1] and row[1].department_id}
+    if dept_ids:
+        dept_rows = (
+            await db.execute(
+                select(Department.id, Department.name).where(Department.id.in_(dept_ids))
+            )
+        ).all()
+        department_names = dict(dept_rows)
+
+    df = _build_export_dataframe(rows, request.include_metadata, department_names)
 
     output = BytesIO()
     if request.format == "csv":

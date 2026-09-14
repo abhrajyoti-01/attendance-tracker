@@ -4,7 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="robots" content="noindex" />
-    <meta name="theme-color" content="#0f766e" />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#0f766e" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0e141b" />
     <meta
       name="description"
       content="Face recognition attendance tracking with real-time feeds and multi-tenant isolation."
@@ -12,6 +13,14 @@
     <link
       rel="icon"
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230f766e'/%3E%3Crect x='9' y='9' width='14' height='14' rx='4' fill='%235eead4'/%3E%3C/svg%3E"
+    />
+    <!-- Inter is the design font. Loaded with display=swap so the UI renders
+         immediately in the fallback stack if the CDN is slow or unreachable. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
     />
     <title>Attendance Tracker</title>
   </head>

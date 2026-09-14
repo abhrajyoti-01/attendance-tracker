@@ -102,10 +102,16 @@ class AntiSpoofSettings(BaseSettings):
     liveness_threshold: float = Field(default=0.67, alias="SPOOF_LIVENESS_THRESHOLD")
     blink_required_window: float = Field(default=3.0, alias="SPOOF_BLINK_REQUIRED_WINDOW")
     nose_movement_px: int = Field(default=12, alias="SPOOF_NOSE_MOVEMENT_PX")
-    texture_variance_min: float = Field(default=15.0, alias="SPOOF_TEXTURE_VARIANCE_MIN")
+    # LBP variance of a 160x160 8-neighbour uniform LBP map. Real camera face
+    # crops measure roughly 2-8; printouts/screens sit lower. The previous 15.0
+    # default was unreachable even for genuine faces, so every live request was
+    # rejected as a spoof.
+    texture_variance_min: float = Field(default=2.5, alias="SPOOF_TEXTURE_VARIANCE_MIN")
     ear_closed: float = Field(default=0.18, alias="SPOOF_EAR_CLOSED")
     ear_open: float = Field(default=0.25, alias="SPOOF_EAR_OPEN")
     blink_consec_frames: int = Field(default=2, alias="SPOOF_BLINK_CONSEC_FRAMES")
+    # Reject single-frame liveness requests (blink/movement need a burst).
+    require_sequence: bool = Field(default=False, alias="SPOOF_REQUIRE_SEQUENCE")
 
 
 class APISettings(BaseSettings):
@@ -128,8 +134,10 @@ class RateLimitSettings(BaseSettings):
 
 
 class CORSSettings(BaseSettings):
-    origins: list[str] = Field(
-        default=["http://localhost:3000", "http://localhost:8080"],
+    # Declared as str so pydantic-settings does not attempt JSON decoding of the
+    # raw env var, then split in a validator. Accepts "a,b", "a" or a JSON array.
+    origins_raw: str = Field(
+        default="http://localhost:3000,http://localhost:8080",
         alias="CORS_ORIGINS",
     )
     allow_credentials: bool = Field(default=True, alias="CORS_ALLOW_CREDENTIALS")
@@ -140,12 +148,33 @@ class CORSSettings(BaseSettings):
         "X-API-Key",
         "X-Correlation-ID",
     ]
+    origins: list[str] = []
 
-    @field_validator("origins", mode="before")
-    def parse_origins(cls, v):
-        if isinstance(v, str):
-            return [origin.strip() for origin in v.split(",") if origin.strip()]
+    @field_validator("origins_raw")
+    @classmethod
+    def parse_origins(cls, v: str) -> str:
         return v
+
+    @model_validator(mode="after")
+    def split_origins(self):
+        raw = (self.origins_raw or "").strip()
+        if raw.startswith("["):
+            import json
+
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"CORS_ORIGINS is not valid JSON: {exc}") from exc
+            items = parsed if isinstance(parsed, list) else [parsed]
+        else:
+            items = raw.split(",")
+
+        origins = [str(o).strip() for o in items if str(o).strip()]
+        bad = [o for o in origins if o != "*" and not o.startswith(("http://", "https://"))]
+        if bad:
+            raise ValueError(f"CORS_ORIGINS entries must start with http:// or https://: {bad}")
+        self.origins = origins
+        return self
 
 
 class LogSettings(BaseSettings):

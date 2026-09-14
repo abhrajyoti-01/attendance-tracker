@@ -1,0 +1,44 @@
+# Keep build context small and prevent leaking local state to the daemon.
+
+# Version control / IDE
+.git
+.gitignore
+.github
+.vscode
+.idea
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+
+# Node
+node_modules/
+dashboard/dist/
+dashboard/node_modules/
+npm-debug.log*
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# NOTE: models/ is intentionally NOT excluded. The ONNX embedding model must be
+# baked into the image (or mounted via the models_data volume), and the API
+# degrades gracefully with a warning when it is absent.
+
+# Local data and runtime state
+*.db
+*.sqlite3
+data/
+training_data/
+logs/
+deployment/nginx/certs/*.pem
+deployment/nginx/certs/*.key

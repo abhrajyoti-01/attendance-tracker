@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 
@@ -14,14 +14,52 @@ export function Layout() {
   const navigate = useNavigate();
   const location = useLocation();
   const [menuOpen, setMenuOpen] = useState(false);
+  const toggleRef = useRef<HTMLButtonElement>(null);
+  const sidebarRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
     setMenuOpen(false);
   }, [location.pathname]);
 
+  // Drawer focus management: move focus in, trap Tab, close on Escape, restore.
+  useEffect(() => {
+    if (!menuOpen) return;
+    const sidebar = sidebarRef.current;
+    const focusables = sidebar?.querySelectorAll<HTMLElement>(
+      'a[href], button:not([disabled]), input, select, textarea, [tabindex]:not([tabindex="-1"])',
+    );
+    focusables?.[0]?.focus();
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setMenuOpen(false);
+        toggleRef.current?.focus();
+        return;
+      }
+      if (event.key !== "Tab" || !focusables || focusables.length === 0) return;
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    document.addEventListener("keydown", onKeyDown);
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [menuOpen]);
+
   const handleLogout = async () => {
     await logout();
-    navigate("/login");
+    navigate("/login", { replace: true });
   };
 
   const links = NAV_ITEMS.filter((item) => isAdmin || item.to === "/");
@@ -37,7 +75,11 @@ export function Layout() {
         />
       )}
 
-      <aside className={menuOpen ? "sidebar open" : "sidebar"}>
+      <aside
+        className={menuOpen ? "sidebar open" : "sidebar"}
+        id="primary-sidebar"
+        ref={sidebarRef}
+      >
         <div className="brand">
           <span className="brand-mark" aria-hidden />
           <span className="name">
@@ -72,12 +114,15 @@ export function Layout() {
         </div>
       </aside>
 
-      <div>
+      <div className="shell-main">
         <header className="topbar">
           <button
             type="button"
             className="menu-btn"
-            aria-label="Toggle navigation"
+            ref={toggleRef}
+            aria-label={menuOpen ? "Close navigation" : "Open navigation"}
+            aria-expanded={menuOpen}
+            aria-controls="primary-sidebar"
             onClick={() => setMenuOpen((open) => !open)}
           >
             <span />
@@ -86,7 +131,7 @@ export function Layout() {
           </button>
           <span className="topbar-title">Attendance Tracker</span>
         </header>
-        <main className="content">
+        <main className="content" id="main-content">
           <Outlet />
         </main>
       </div>

@@ -5,7 +5,6 @@ completed/failed, persisting metrics, checkpoint path, and ONNX export path to
 the ``training_jobs`` table so the API can poll real status.
 """
 
-import asyncio
 import traceback
 from datetime import UTC, datetime
 from uuid import UUID
@@ -13,6 +12,7 @@ from uuid import UUID
 import structlog
 from sqlalchemy import select
 
+from src.workers.async_runner import run_async
 from src.workers.celery_app import celery_app
 
 logger = structlog.get_logger(__name__)
@@ -51,7 +51,7 @@ def start_training_task(self, job_id: str):
             await db.commit()
 
     try:
-        asyncio.run(_run())
+        run_async(_run())
     except Exception as exc:
         logger.exception("Unable to start training job", job_id=job_id)
         return {"success": False, "job_id": job_id, "error": str(exc)}
@@ -91,12 +91,12 @@ def start_training_task(self, job_id: str):
                     job.onnx_path = onnx
                 await db.commit()
 
-        asyncio.run(_update())
+        run_async(_update())
 
     try:
         from src.training.trainer import TrainingConfig, run_training
 
-        job_row = asyncio.run(_load_job(UUID(job_id)))
+        job_row = run_async(_load_job(UUID(job_id)))
         config_dict = dict(job_row.config or {}) if job_row else {}
         config = TrainingConfig(config_dict)
 
@@ -129,7 +129,7 @@ def start_training_task(self, job_id: str):
 def check_training_status_task(job_id: str):
     """Read current persisted status for a training job."""
     try:
-        row = asyncio.run(_load_job(UUID(job_id)))
+        row = run_async(_load_job(UUID(job_id)))
         if row is None:
             return {"success": False, "job_id": job_id, "error": "job not found"}
         return {

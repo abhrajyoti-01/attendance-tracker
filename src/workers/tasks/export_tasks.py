@@ -5,7 +5,6 @@ materialized into CSV/Excel, uploaded to object storage, and a presigned URL
 is stored in the task result for the requester.
 """
 
-import asyncio
 from datetime import date, datetime, timedelta
 from io import BytesIO
 
@@ -13,6 +12,7 @@ import pandas as pd
 import structlog
 from sqlalchemy import select
 
+from src.workers.async_runner import run_async
 from src.workers.celery_app import celery_app
 
 logger = structlog.get_logger(__name__)
@@ -49,18 +49,20 @@ async def _fetch_rows(org_id, date_from: date, date_to: date):
 
 
 def _build_dataframe(rows, include_metadata: bool) -> pd.DataFrame:
+    from src.services.export_safety import sanitize_cell
+
     data = [
         {
             "ID": str(att.id),
-            "User": name or "Unknown",
-            "External ID": external_id or "",
-            "Department": dept or "",
+            "User": sanitize_cell(name or "Unknown"),
+            "External ID": sanitize_cell(external_id or ""),
+            "Department": sanitize_cell(dept or ""),
             "Timestamp": att.timestamp.isoformat(),
             "Method": att.method,
             "Confidence": f"{att.confidence:.3f}" if att.confidence is not None else "",
-            "Device": att.device_id or "",
+            "Device": sanitize_cell(att.device_id or ""),
             "Is Spoof": "Yes" if att.is_spoof else "No",
-            **({"Metadata": str(att.metadata_)} if include_metadata else {}),
+            **({"Metadata": sanitize_cell(att.metadata_)} if include_metadata else {}),
         }
         for att, name, external_id, dept in rows
     ]
@@ -107,7 +109,7 @@ def generate_export_task(
         if fmt not in ("csv", "excel"):
             raise ValueError(f"Unsupported export format: {fmt}")
 
-        rows = asyncio.run(_fetch_rows(organization_id, parsed_from, parsed_to))
+        rows = run_async(_fetch_rows(organization_id, parsed_from, parsed_to))
         if len(rows) > EXPORT_HARD_LIMIT_ROWS:
             raise ValueError(
                 f"Range contains more than {EXPORT_HARD_LIMIT_ROWS} records; narrow the range"

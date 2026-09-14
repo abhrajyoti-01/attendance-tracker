@@ -1,11 +1,11 @@
 """Embedding-related background tasks."""
 
-import asyncio
 from uuid import UUID
 
 import numpy as np
 import structlog
 
+from src.workers.async_runner import run_async
 from src.workers.celery_app import celery_app
 
 logger = structlog.get_logger(__name__)
@@ -47,7 +47,7 @@ def compute_embedding_task(self, user_id: str, image_paths: list[str]):
                 rejected["no_face"] += 1
                 continue
 
-            face_uint8 = np.clip(face * 255.0, 0, 255).astype(np.uint8)
+            face_uint8 = face
             quality = quality_checker.check(face_uint8)
             if not quality["valid"]:
                 rejected["low_quality"] += 1
@@ -99,7 +99,7 @@ def compute_embedding_task(self, user_id: str, image_paths: list[str]):
                 await db.commit()
                 return avg_quality
 
-        avg_quality = asyncio.run(_persist())
+        avg_quality = run_async(_persist())
 
         logger.info(
             "Embedding computed",

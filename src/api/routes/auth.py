@@ -3,7 +3,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request,
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.dependencies import get_current_user, get_organization_by_slug
+from src.api.dependencies import get_current_user
 from src.api.schemas.auth import (
     ChangePasswordRequest,
     ForgotPasswordRequest,
@@ -69,6 +69,9 @@ async def login(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
     if not org.is_active:
+        # Same shape as a bad credential so an attacker cannot probe which
+        # organizations exist. Deliberately no "organization is inactive" hint.
+        verify_password(request.password, _DUMMY_HASH)
         await record_audit(
             db,
             "auth.login_failed",
@@ -77,9 +80,7 @@ async def login(
             ip_address=client_ip,
             commit=True,
         )
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail="Organization is inactive"
-        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
     email_normalized = request.email.lower().strip()
     result = await db.execute(
@@ -100,6 +101,24 @@ async def login(
         logger.warning("Login failed - unknown user", org=org.slug)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
+    # Verify the password *before* revealing anything about account state, so a
+    # wrong password and a disabled account are indistinguishable to a prober.
+    password_ok = user.password_hash is not None and verify_password(
+        request.password, user.password_hash
+    )
+    if not password_ok:
+        await record_audit(
+            db,
+            "auth.login_failed",
+            organization_id=org.id,
+            actor_id=user.id,
+            details={"reason": "bad_password"},
+            ip_address=client_ip,
+            commit=True,
+        )
+        logger.warning("Login failed - bad password", user_id=str(user.id))
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+
     if not user.is_active:
         await record_audit(
             db,
@@ -113,19 +132,6 @@ async def login(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="User account is inactive"
         )
-
-    if user.password_hash is None or not verify_password(request.password, user.password_hash):
-        await record_audit(
-            db,
-            "auth.login_failed",
-            organization_id=org.id,
-            actor_id=user.id,
-            details={"reason": "bad_password"},
-            ip_address=client_ip,
-            commit=True,
-        )
-        logger.warning("Login failed - bad password", user_id=str(user.id))
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
     pair = await issue_token_pair(db, user=user, client_ip=client_ip)
     await record_audit(
@@ -193,11 +199,29 @@ async def forgot_password(
     request: ForgotPasswordRequest,
     background_tasks: BackgroundTasks,
     http_request: Request,
-    org: Organization = Depends(get_organization_by_slug),
     db: AsyncSession = Depends(get_db),
 ):
-    """Responds identically whether or not the account exists."""
+    """Always responds 202 with the same body, whether or not the org/user exists."""
     client_ip = _client_ip(http_request)
+    generic_response = {
+        "message": "If the email exists, a reset link has been sent",
+        "email_delivery_configured": settings.email.enabled,
+    }
+
+    org_result = await db.execute(
+        select(Organization).where(Organization.slug == request.organization_slug)
+    )
+    org = org_result.scalar_one_or_none()
+    if org is None or not org.is_active:
+        await record_audit(
+            db,
+            "auth.password_reset_requested",
+            details={"reason": "unknown_or_inactive_org", "org_slug": request.organization_slug},
+            ip_address=client_ip,
+            commit=True,
+        )
+        return generic_response
+
     user = await resolve_user_for_reset(db, organization=org, email=request.email)
 
     if user is not None and user.is_active:
@@ -227,10 +251,7 @@ async def forgot_password(
             commit=False,
         )
 
-    return {
-        "message": "If the email exists, a reset link has been sent",
-        "email_delivery_configured": settings.email.enabled,
-    }
+    return generic_response
 
 
 @router.post("/reset-password", status_code=status.HTTP_200_OK)

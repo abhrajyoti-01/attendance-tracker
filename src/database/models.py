@@ -129,6 +129,12 @@ class User(Base):
     role: Mapped[str] = mapped_column(String(50), default="member", nullable=False)
     password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    # Bumped on logout / password change / admin reset; access tokens carry the
+    # value they were minted with so a stale token is rejected immediately
+    # rather than remaining valid until expiry.
+    token_version: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
     # NOTE: attribute must not be named "metadata" - SQLAlchemy reserves it.
     metadata_: Mapped[dict] = mapped_column("metadata", JSON, default=dict, nullable=False)
 

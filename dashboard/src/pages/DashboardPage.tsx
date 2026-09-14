@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api, streamLiveFeed } from "../api/client";
+import type { FeedStatus } from "../api/client";
 import type {
   DailyChart,
   DashboardSummary,
@@ -11,17 +12,45 @@ import { useAuth } from "../auth/AuthContext";
 import { BarChart } from "../components/BarChart";
 
 const DAYS_WINDOW = 30;
+const FEED_LIMIT = 30;
+
+function isValidFeedEvent(raw: Record<string, unknown>): raw is Record<string, unknown> & FeedEvent {
+  return (
+    typeof raw.id === "string" &&
+    typeof raw.user_id === "string" &&
+    typeof raw.timestamp === "string" &&
+    typeof raw.is_spoof === "boolean"
+  );
+}
+
+function normaliseEvent(raw: Record<string, unknown>): FeedEvent {
+  return {
+    id: String(raw.id),
+    user_id: String(raw.user_id),
+    user_name: typeof raw.user_name === "string" ? raw.user_name : "Unknown",
+    user_external_id: typeof raw.user_external_id === "string" ? raw.user_external_id : null,
+    timestamp: String(raw.timestamp),
+    method: typeof raw.method === "string" ? raw.method : "auto",
+    confidence: typeof raw.confidence === "number" ? raw.confidence : null,
+    is_spoof: Boolean(raw.is_spoof),
+    department_name: typeof raw.department_name === "string" ? raw.department_name : null,
+  };
+}
 
 function formatClock(iso: string): string {
-  return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "—";
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
 function timeAgo(iso: string): string {
-  const seconds = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  const seconds = Math.max(0, (Date.now() - date.getTime()) / 1000);
   if (seconds < 60) return "just now";
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
   if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
-  return new Date(iso).toLocaleDateString();
+  return date.toLocaleDateString();
 }
 
 function DashboardSkeleton() {
@@ -46,41 +75,78 @@ export function DashboardPage() {
   const [hourly, setHourly] = useState<HourlyChart | null>(null);
   const [departments, setDepartments] = useState<DepartmentChart | null>(null);
   const [feed, setFeed] = useState<FeedEvent[]>([]);
+  const [feedStatus, setFeedStatus] = useState<FeedStatus>("connecting");
   const [error, setError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const { isAdmin, userName } = useAuth();
 
   useEffect(() => {
+    document.title = "Overview · Attendance Tracker";
+  }, []);
+
+  const load = useCallback(async () => {
+    setRefreshing(true);
+    // Settle each request independently so one failure does not blank the page.
+    const [summaryResult, dailyResult, hourlyResult, deptResult] = await Promise.allSettled([
+      api.summary(),
+      api.dailyChart(DAYS_WINDOW),
+      api.hourlyChart(),
+      api.departmentChart(),
+    ]);
+
+    if (summaryResult.status === "fulfilled") setSummary(summaryResult.value);
+    if (dailyResult.status === "fulfilled") setDaily(dailyResult.value);
+    if (hourlyResult.status === "fulfilled") setHourly(hourlyResult.value);
+    if (deptResult.status === "fulfilled") setDepartments(deptResult.value);
+
+    const failure =
+      summaryResult.status === "rejected"
+        ? summaryResult.reason
+        : dailyResult.status === "rejected"
+          ? dailyResult.reason
+          : hourlyResult.status === "rejected"
+            ? hourlyResult.reason
+            : deptResult.status === "rejected"
+              ? deptResult.reason
+              : null;
+
+    setError(
+      failure ? (failure instanceof Error ? failure.message : "Some dashboard data failed to load") : null,
+    );
+    setLastUpdated(new Date());
+    setRefreshing(false);
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  // Backfill the feed so the panel is not empty until the next live event.
+  useEffect(() => {
+    if (!isAdmin) return;
     let cancelled = false;
-    (async () => {
-      try {
-        const results = await Promise.all([
-          api.summary(),
-          api.dailyChart(DAYS_WINDOW),
-          api.hourlyChart(),
-          api.departmentChart(),
-        ]);
-        if (cancelled) return;
-        setSummary(results[0]);
-        setDaily(results[1]);
-        setHourly(results[2]);
-        setDepartments(results[3]);
-      } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load dashboard");
-      }
-    })();
+    api
+      .feed(FEED_LIMIT)
+      .then((data) => {
+        if (!cancelled && data.events.length) setFeed(data.events);
+      })
+      .catch(() => undefined);
     return () => {
       cancelled = true;
     };
+  }, [isAdmin]);
+
+  const onEvent = useCallback((raw: Record<string, unknown>) => {
+    if (!isValidFeedEvent(raw)) return;
+    const event = normaliseEvent(raw);
+    setFeed((prev) => [event, ...prev.filter((e) => e.id !== event.id)].slice(0, FEED_LIMIT));
   }, []);
 
-  const onEvent = useCallback((event: Record<string, unknown>) => {
-    setFeed((prev) => [event as unknown as FeedEvent, ...prev].slice(0, 30));
-  }, []);
-  const abortRef = useRef<(() => void) | null>(null);
   useEffect(() => {
     if (!isAdmin) return;
-    abortRef.current = streamLiveFeed(onEvent);
-    return () => abortRef.current?.();
+    const abort = streamLiveFeed(onEvent, setFeedStatus);
+    return abort;
   }, [isAdmin, onEvent]);
 
   const head = (
@@ -89,36 +155,54 @@ export function DashboardPage() {
         <h1>Overview</h1>
         <p className="subtitle">
           Welcome back{userName ? `, ${userName}` : ""}. Here is today at a glance.
+          {lastUpdated && <span className="muted"> · updated {timeAgo(lastUpdated.toISOString())}</span>}
         </p>
       </div>
+      <button
+        type="button"
+        className="btn secondary"
+        onClick={() => void load()}
+        disabled={refreshing}
+        aria-busy={refreshing}
+      >
+        {refreshing ? "Refreshing…" : "Refresh"}
+      </button>
     </header>
   );
 
-  if (error) {
-    return (
-      <>
-        {head}
-        <div className="alert error">{error}</div>
-      </>
-    );
-  }
   if (!summary) {
     return (
       <>
         {head}
+        {error && (
+          <div className="alert error" role="alert">
+            {error}
+          </div>
+        )}
         <DashboardSkeleton />
       </>
     );
   }
 
-  return <DashboardLoaded
-    summary={summary}
-    daily={daily}
-    hourly={hourly}
-    departments={departments}
-    feed={feed}
-    isAdmin={isAdmin}
-  />;
+  return (
+    <>
+      {head}
+      {error && (
+        <div className="alert warn" role="alert">
+          {error}
+        </div>
+      )}
+      <DashboardLoaded
+        summary={summary}
+        daily={daily}
+        hourly={hourly}
+        departments={departments}
+        feed={feed}
+        feedStatus={feedStatus}
+        isAdmin={isAdmin}
+      />
+    </>
+  );
 }
 
 interface LoadedProps {
@@ -127,10 +211,19 @@ interface LoadedProps {
   hourly: HourlyChart | null;
   departments: DepartmentChart | null;
   feed: FeedEvent[];
+  feedStatus: FeedStatus;
   isAdmin: boolean;
 }
 
-function DashboardLoaded({ summary, daily, hourly, departments, feed, isAdmin }: LoadedProps) {
+function DashboardLoaded({
+  summary,
+  daily,
+  hourly,
+  departments,
+  feed,
+  feedStatus,
+  isAdmin,
+}: LoadedProps) {
   const attendanceRate =
     summary.active_users > 0
       ? Math.round((summary.present_today / summary.active_users) * 100)
@@ -190,9 +283,13 @@ function DashboardLoaded({ summary, daily, hourly, departments, feed, isAdmin }:
             <span className="hint">last {DAYS_WINDOW} days</span>
           </div>
           {daily && (
-            <BarChart points={daily.data.map((d) => ({ label: d.date.slice(5), value: d.present }))} />
+            <BarChart
+              ariaLabel={`Daily attendance, unique present per day, last ${DAYS_WINDOW} days`}
+              unitLabel="present"
+              points={daily.data.map((d) => ({ label: d.date.slice(5), value: d.present }))}
+            />
           )}
-          <div style={{ marginTop: "0.6rem" }}>
+          <div className="chart-caption">
             <span className="legend">unique present per day</span>
           </div>
         </div>
@@ -204,15 +301,26 @@ function DashboardLoaded({ summary, daily, hourly, departments, feed, isAdmin }:
           </div>
           {hourly && (
             <BarChart
-              points={hourly.data
-                .filter((p) => p.hour >= 6 && p.hour <= 21)
-                .map((p) => ({ label: `${p.hour}:00`, value: p.check_ins }))}
+              ariaLabel="Check-ins by hour of day, today"
+              unitLabel="check-ins"
+              points={hourly.data.map((p) => ({
+                label: `${String(p.hour).padStart(2, "0")}:00`,
+                value: p.check_ins,
+              }))}
             />
           )}
+          <div className="chart-caption">
+            <span className="legend">all 24 hours, local time</span>
+          </div>
         </div>
       </section>
 
-      <DepartmentsAndFeed departments={departments} feed={feed} isAdmin={isAdmin} />
+      <DepartmentsAndFeed
+        departments={departments}
+        feed={feed}
+        feedStatus={feedStatus}
+        isAdmin={isAdmin}
+      />
     </>
   );
 }
@@ -220,12 +328,17 @@ function DashboardLoaded({ summary, daily, hourly, departments, feed, isAdmin }:
 function DepartmentsAndFeed({
   departments,
   feed,
+  feedStatus,
   isAdmin,
 }: {
   departments: DepartmentChart | null;
   feed: FeedEvent[];
+  feedStatus: FeedStatus;
   isAdmin: boolean;
 }) {
+  const statusLabel =
+    feedStatus === "live" ? "streaming" : feedStatus === "connecting" ? "connecting…" : "offline";
+
   return (
     <section className="panel-row">
       <div className="panel">
@@ -235,12 +348,13 @@ function DepartmentsAndFeed({
         </div>
         <div className="table-scroll">
           <table>
+            <caption className="sr-only">Attendance rate by department today</caption>
             <thead>
               <tr>
-                <th>Department</th>
-                <th>Members</th>
-                <th>Present</th>
-                <th>Rate</th>
+                <th scope="col">Department</th>
+                <th scope="col">Members</th>
+                <th scope="col">Present</th>
+                <th scope="col">Rate</th>
               </tr>
             </thead>
             <tbody>
@@ -262,7 +376,10 @@ function DepartmentsAndFeed({
                 <tr>
                   <td colSpan={4}>
                     <div className="empty-state">
-                      No departments yet. Create one to start tracking teams.
+                      <strong>No departments yet</strong>
+                      <span className="muted">
+                        Create one to start tracking teams and their attendance.
+                      </span>
                     </div>
                   </td>
                 </tr>
@@ -278,7 +395,11 @@ function DepartmentsAndFeed({
           <span className="hint">
             {isAdmin ? (
               <>
-                <span className="live-dot" aria-hidden /> streaming
+                <span
+                  className={`live-dot ${feedStatus}`}
+                  aria-hidden
+                />
+                <span aria-live="polite">{statusLabel}</span>
               </>
             ) : (
               "admins only"
@@ -295,7 +416,8 @@ function DepartmentsAndFeed({
                     <strong>{event.is_spoof ? "Spoof attempt blocked" : event.user_name}</strong>
                     <span className="feed-sub">
                       {[
-                        !event.is_spoof && (event.department_name ?? event.user_external_id ?? "—"),
+                        !event.is_spoof &&
+                          (event.department_name ?? event.user_external_id ?? "—"),
                         event.confidence != null
                           ? `${Math.round(event.confidence * 100)}% match`
                           : null,
@@ -312,7 +434,16 @@ function DepartmentsAndFeed({
               ))}
             </ul>
           ) : (
-            <div className="empty-state">Connected and waiting for recognition events…</div>
+            <div className="empty-state">
+              <strong>
+                {feedStatus === "offline" ? "Live feed disconnected" : "Waiting for events"}
+              </strong>
+              <span className="muted">
+                {feedStatus === "offline"
+                  ? "Reconnecting automatically. Recent events will appear once the stream is back."
+                  : "Recognition check-ins will appear here the moment they happen."}
+              </span>
+            </div>
           )
         ) : (
           <div className="empty-state">

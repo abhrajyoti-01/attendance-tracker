@@ -38,9 +38,10 @@ async def issue_token_pair(
     """Create a fresh access/refresh pair and persist the refresh jti."""
     subject = str(user.id)
     org_id = str(user.organization_id)
+    tv = int(user.token_version or 0)
 
-    access_token = create_access_token(data={"sub": subject, "org_id": org_id})
-    refresh_token, jti = create_refresh_token(data={"sub": subject, "org_id": org_id})
+    access_token = create_access_token(data={"sub": subject, "org_id": org_id, "tv": tv})
+    refresh_token, jti = create_refresh_token(data={"sub": subject, "org_id": org_id, "tv": tv})
 
     record = RefreshTokenRecord(
         jti=jti,
@@ -102,8 +103,16 @@ async def rotate_refresh_token(
     if user is None or not user.is_active:
         raise _invalid_credentials()
 
+    # A rotated token minted before a credential change (tv bump) is stale.
+    if int(payload.get("tv", 0)) != int(user.token_version or 0):
+        raise _invalid_credentials()
+
     new_refresh_token, new_jti = create_refresh_token(
-        data={"sub": str(user.id), "org_id": str(user.organization_id)}
+        data={
+            "sub": str(user.id),
+            "org_id": str(user.organization_id),
+            "tv": int(user.token_version or 0),
+        }
     )
     record.revoked_at = now
     record.replaced_by_jti = new_jti
@@ -120,7 +129,11 @@ async def rotate_refresh_token(
     await db.commit()
 
     access_token = create_access_token(
-        data={"sub": str(user.id), "org_id": str(user.organization_id)}
+        data={
+            "sub": str(user.id),
+            "org_id": str(user.organization_id),
+            "tv": int(user.token_version or 0),
+        }
     )
     return (
         TokenPair(
@@ -153,16 +166,23 @@ async def revoke_refresh_token(db: AsyncSession, raw_refresh_token: str) -> bool
 async def revoke_all_user_tokens(
     db: AsyncSession, user_id: UUID | str, *, reason: str = "logout_all"
 ) -> int:
+    """Invalidate every refresh token *and* all outstanding access tokens.
+
+    Bumping ``users.token_version`` makes tokens presented after this call fail
+    verification immediately, instead of remaining usable until they expire.
+    """
     result = await db.execute(
         update(RefreshTokenRecord)
         .where(RefreshTokenRecord.user_id == user_id)
         .where(RefreshTokenRecord.revoked_at.is_(None))
         .values(revoked_at=datetime.now(UTC))
     )
+    await db.execute(
+        update(User).where(User.id == user_id).values(token_version=User.token_version + 1)
+    )
     await db.commit()
     revoked = result.rowcount or 0
-    if revoked:
-        logger.info("Revoked user sessions", user_id=str(user_id), count=revoked, reason=reason)
+    logger.info("Revoked user sessions", user_id=str(user_id), count=revoked, reason=reason)
     return revoked
 
 

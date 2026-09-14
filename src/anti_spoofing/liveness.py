@@ -26,6 +26,7 @@ class LivenessDetector:
             "blink_required_window": settings.anti_spoof.blink_required_window,
             "nose_movement_px": settings.anti_spoof.nose_movement_px,
             "texture_variance_min": settings.anti_spoof.texture_variance_min,
+            "liveness_threshold": settings.anti_spoof.liveness_threshold,
         }
 
         self.face_mesh = mp.solutions.face_mesh.FaceMesh(
@@ -59,85 +60,158 @@ class LivenessDetector:
             self.movement_detected = False
             self.texture_detected = False
 
-    def check(self, face_image: np.ndarray) -> tuple[bool, str, float]:
+    @staticmethod
+    def _as_uint8_rgb(frame: np.ndarray) -> np.ndarray:
+        """Coerce a crop to contiguous uint8 RGB, the only format MediaPipe accepts."""
+        arr = frame
+        if arr.dtype != np.uint8:
+            if arr.dtype.kind == "f" and arr.max(initial=0.0) <= 1.5:
+                arr = arr * 255.0
+            arr = np.clip(arr, 0, 255).astype(np.uint8)
+        if not arr.flags["C_CONTIGUOUS"]:
+            arr = np.ascontiguousarray(arr)
+        return arr
+
+    def check(
+        self, face_image: np.ndarray | list[np.ndarray], threshold: float | None = None
+    ) -> tuple[bool, str, float]:
+        """Assess liveness over one frame or a short burst of frames.
+
+        Blink and head-movement are temporal signals: they are only measurable
+        when several frames are supplied, and each is scored independently of
+        the others. A single frame can therefore only be judged on its static
+        texture, and ``anti_spoof.require_sequence`` can be set to reject
+        single-frame requests outright for high-security deployments.
+
+        Frames must be RGB uint8 crops (as produced by ``FaceDetector.detect``).
+        ``threshold`` overrides ``anti_spoof.liveness_threshold`` (per-org setting).
+        Returns ``(is_live, reason, score)`` where score is the fraction of
+        *available* checks that passed.
+        """
+        frames = [face_image] if isinstance(face_image, np.ndarray) else list(face_image)
+
+        if not frames:
+            return False, "no_frames", 0.0
+        if settings.anti_spoof.require_sequence and len(frames) < 2:
+            return False, "sequence_required", 0.0
+
         with self._lock:
             try:
-                rgb = cv2.cvtColor(face_image, cv2.COLOR_BGR2RGB)
-                results = self.face_mesh.process(rgb)
-
-                if not results.multi_face_landmarks:
-                    return False, "no_face", 0.0
-
-                lm = results.multi_face_landmarks[0]
-                h, w = face_image.shape[:2]
-
-                ear = self._compute_ear(lm, LEFT_EYE_IDXS, w, h)
-                right_ear = self._compute_ear(lm, RIGHT_EYE_IDXS, w, h)
-                avg_ear = (ear + right_ear) / 2.0
-
-                self.ear_history.append(avg_ear)
-
-                if avg_ear < self.config["ear_closed"]:
-                    self.frame_counter += 1
-                else:
-                    if self.frame_counter >= self.config["blink_consec_frames"]:
-                        self.last_blink_time = time.time()
-                    self.frame_counter = 0
-
-                nose_tip = (
-                    int(lm.landmark[NOSE_IDX].x * w),
-                    int(lm.landmark[NOSE_IDX].y * h),
-                )
-                self.nose_history.append(nose_tip)
-
-                movement = self._compute_movement()
-                self.movement_detected = movement >= self.config["nose_movement_px"]
-
-                gray = cv2.cvtColor(face_image, cv2.COLOR_BGR2GRAY)
-                lbp = local_binary_pattern(gray, P=8, R=1, method="uniform")
-                lbp_var = np.var(lbp.astype(np.float32))
-                self.texture_history.append(lbp_var)
-
-                texture_score = np.mean(self.texture_history) if self.texture_history else 0.0
-                self.texture_detected = texture_score >= self.config["texture_variance_min"]
-
-                blinked = (time.time() - self.last_blink_time) < self.config[
-                    "blink_required_window"
-                ]
-
-                passed_checks = 0
-                reasons = []
-
-                if blinked:
-                    passed_checks += 1
-                else:
-                    reasons.append("no_blink")
-
-                if self.movement_detected:
-                    passed_checks += 1
-                else:
-                    reasons.append("no_movement")
-
-                if self.texture_detected:
-                    passed_checks += 1
-                else:
-                    reasons.append("low_texture")
-
-                liveness_score = passed_checks / 3.0
-                is_live = liveness_score >= self.config["liveness_threshold"]
-
-                if is_live:
-                    logger.debug(
-                        "Liveness check passed", score=liveness_score, checks_passed=passed_checks
-                    )
-                else:
-                    logger.debug("Liveness check failed", score=liveness_score, reasons=reasons)
-
-                return is_live, ",".join(reasons), liveness_score
-
+                return self._evaluate(frames, threshold)
             except Exception as e:
-                logger.error("Liveness check error", error=str(e))
+                # Fail closed, but log loudly: silently swallowing a KeyError or
+                # dtype error here means every request looks like a spoof attempt.
+                logger.error(
+                    "Liveness check error - failing closed",
+                    error=str(e),
+                    error_type=type(e).__name__,
+                )
                 return False, "error", 0.0
+
+    def _evaluate(
+        self, frames: list[np.ndarray], threshold: float | None = None
+    ) -> tuple[bool, str, float]:
+        ear_series: list[float] = []
+        nose_points: list[tuple[int, int]] = []
+        texture_scores: list[float] = []
+
+        for frame in frames:
+            rgb = self._as_uint8_rgb(frame)
+            results = self.face_mesh.process(rgb)
+            if not results.multi_face_landmarks:
+                continue
+
+            lm = results.multi_face_landmarks[0]
+            h, w = rgb.shape[:2]
+
+            left_ear = self._compute_ear(lm, LEFT_EYE_IDXS, w, h)
+            right_ear = self._compute_ear(lm, RIGHT_EYE_IDXS, w, h)
+            ear_series.append((left_ear + right_ear) / 2.0)
+            nose_points.append((int(lm.landmark[NOSE_IDX].x * w), int(lm.landmark[NOSE_IDX].y * h)))
+
+            gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+            lbp = local_binary_pattern(gray, P=8, R=1, method="uniform")
+            texture_scores.append(float(np.var(lbp.astype(np.float32))))
+
+        if not ear_series:
+            return False, "no_face", 0.0
+
+        self.ear_history.extend(ear_series)
+        self.nose_history.extend(nose_points)
+        self.texture_history.extend(texture_scores[-10:])
+
+        reasons: list[str] = []
+        passed = 0
+        available = 0
+
+        # Texture is measurable from a single frame.
+        available += 1
+        texture_score = float(np.mean(texture_scores))
+        self.texture_detected = texture_score >= self.config["texture_variance_min"]
+        if self.texture_detected:
+            passed += 1
+        else:
+            reasons.append("low_texture")
+
+        # Blink: ear must dip below ear_closed and later rise above ear_open.
+        if len(ear_series) >= 3:
+            available += 1
+            closed_at = next(
+                (i for i, ear in enumerate(ear_series) if ear < self.config["ear_closed"]), None
+            )
+            reopened = closed_at is not None and any(
+                ear > self.config["ear_open"] for ear in ear_series[closed_at + 1 :]
+            )
+            self.blink_detected = reopened
+            if reopened:
+                passed += 1
+                self.last_blink_time = time.time()
+            else:
+                reasons.append("no_blink")
+
+        # Head movement: cumulative nose displacement across the burst.
+        if len(nose_points) >= 5:
+            available += 1
+            movement = sum(
+                float(
+                    np.hypot(
+                        nose_points[i][0] - nose_points[i - 1][0],
+                        nose_points[i][1] - nose_points[i - 1][1],
+                    )
+                )
+                for i in range(1, len(nose_points))
+            )
+            self.movement_detected = movement >= self.config["nose_movement_px"]
+            if self.movement_detected:
+                passed += 1
+            else:
+                reasons.append("no_movement")
+
+        liveness_score = passed / float(available)
+        effective_threshold = (
+            threshold if threshold is not None else self.config["liveness_threshold"]
+        )
+        is_live = liveness_score >= effective_threshold
+
+        if is_live:
+            logger.debug(
+                "Liveness check passed",
+                score=liveness_score,
+                checks_passed=passed,
+                frames=len(frames),
+            )
+        else:
+            logger.debug(
+                "Liveness check failed",
+                score=liveness_score,
+                reasons=reasons,
+                frames=len(frames),
+            )
+
+        detail = ",".join(reasons) if reasons else "live"
+        if available == 1:
+            detail = f"static_only,{detail}" if reasons else "static_only"
+        return is_live, detail, liveness_score
 
     def _compute_ear(self, landmarks, eye_indices, w: int, h: int) -> float:
         points = []
@@ -239,7 +313,7 @@ class LivenessDetectorLazy:
             cls._instance = None
 
 
-def check_liveness(face_image: np.ndarray) -> tuple[bool, str, float]:
+def check_liveness(face_image: np.ndarray | list[np.ndarray]) -> tuple[bool, str, float]:
     detector = LivenessDetectorLazy.get_instance()
     return detector.check(face_image)
 

@@ -163,20 +163,29 @@ async def observe_requests(request: Request, call_next: RequestResponseEndpoint)
     method = request.method
     path = request.url.path
     client_ip = request.client.host if request.client else None
+    # Use the route template, not the raw URL, so /api/users/{id} does not
+    # create one Prometheus time series per user ID.
+    endpoint = path
 
     try:
         response = await call_next(request)
     except Exception as exc:
         duration_ms = (time.perf_counter() - start_time) * 1000
-        http_requests_total.labels(method=method, endpoint=path, status_code=500).inc()
+        http_requests_total.labels(method=method, endpoint=endpoint, status_code=500).inc()
         log_exception(
             logger, exc, method=method, path=path, duration_ms=duration_ms, client_ip=client_ip
         )
         raise
 
+    route = request.scope.get("route")
+    if route is not None and getattr(route, "path", None):
+        endpoint = route.path
+
     duration_ms = (time.perf_counter() - start_time) * 1000
-    http_requests_total.labels(method=method, endpoint=path, status_code=response.status_code).inc()
-    http_request_duration.labels(method=method, endpoint=path).observe(duration_ms / 1000)
+    http_requests_total.labels(
+        method=method, endpoint=endpoint, status_code=response.status_code
+    ).inc()
+    http_request_duration.labels(method=method, endpoint=endpoint).observe(duration_ms / 1000)
 
     if path != "/health":
         logger.info(

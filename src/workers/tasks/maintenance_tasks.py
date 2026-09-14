@@ -1,10 +1,10 @@
 """Periodic maintenance tasks run by Celery beat."""
 
-import asyncio
 from datetime import UTC, datetime, timedelta
 
 import structlog
 
+from src.workers.async_runner import run_async
 from src.workers.celery_app import celery_app
 
 logger = structlog.get_logger(__name__)
@@ -47,7 +47,7 @@ def cleanup_expired_tokens_task(retention_days: int = 30):
             }
 
     try:
-        result = asyncio.run(_cleanup())
+        result = run_async(_cleanup())
         logger.info("Token cleanup complete", **result)
         return result
     except Exception as exc:
@@ -71,7 +71,7 @@ def purge_old_spoof_attempts_task(retention_days: int = 90):
             return {"success": True, "spoof_attempts_deleted": result.rowcount}
 
     try:
-        result = asyncio.run(_purge())
+        result = run_async(_purge())
         logger.info("Spoof attempt purge complete", **result)
         return result
     except Exception as exc:
@@ -85,7 +85,7 @@ def refresh_matcher_indexes_task():
     from src.inference.index_manager import matcher_registry
 
     try:
-        asyncio.run(matcher_registry.refresh_all())
+        run_async(matcher_registry.refresh_all())
         return {"success": True}
     except Exception as exc:
         logger.exception("Matcher refresh failed")

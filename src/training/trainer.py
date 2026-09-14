@@ -59,6 +59,21 @@ def _build_model(device: str) -> torch.nn.Module:
     return model.to(device).train()
 
 
+def _amp_available() -> bool:
+    return hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler")
+
+
+def _build_grad_scaler(enabled: bool):
+    """GradScaler across torch versions.
+
+    ``torch.amp.GradScaler("cuda", ...)`` only exists from torch 2.3; the
+    pinned 2.2.x exposes ``torch.cuda.amp.GradScaler``.
+    """
+    if _amp_available():
+        return torch.amp.GradScaler("cuda", enabled=enabled)
+    return torch.cuda.amp.GradScaler(enabled=enabled)
+
+
 class Trainer:
     def __init__(
         self,
@@ -108,7 +123,7 @@ class Trainer:
             self.optimizer, T_max=max(1, config.epochs)
         )
         self.use_amp = self.device == "cuda"
-        self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
+        self.scaler = _build_grad_scaler(self.use_amp)
 
         output = Path(config.output_dir) / f"run_{int(time.time())}"
         output.mkdir(parents=True, exist_ok=True)
@@ -124,7 +139,7 @@ class Trainer:
             labels = labels.to(self.device, non_blocking=True)
 
             self.optimizer.zero_grad(set_to_none=True)
-            with torch.autocast("cuda", enabled=self.use_amp):
+            with torch.autocast(self.device, enabled=self.use_amp):
                 embeddings = self.model(images)
                 loss = self.criterion(embeddings, labels)
 

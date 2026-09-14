@@ -9,7 +9,8 @@ x-api-env: &api-env
   MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
   MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?set MINIO_SECRET_KEY}
   STORAGE_ENABLED: ${STORAGE_ENABLED:-true}
-  JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET - generate with: python -c "import secrets; print(secrets.token_urlsafe(48))"}
+  # Colons inside the default value must be quoted or YAML tries to parse a map.
+  JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET - generate with python -c "import secrets; print(secrets.token_urlsafe(48))"}
   ENV: ${ENV:-production}
   DEBUG: "false"
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -99,7 +100,7 @@ services:
       uvicorn src.api.main:app
       --host 0.0.0.0
       --port 8000
-      --workers 4
+      --workers ${API_WORKERS:-4}
       --proxy-headers
       --forwarded-allow-ips "*"
       --timeout-keep-alive 30
@@ -110,6 +111,15 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      # The API refuses to start on a stale schema, so wait for migrations to
+      # finish instead of crash-looping on a fresh `up`.
+      migrate:
+        condition: service_completed_successfully
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     expose:
       - "8000"
     volumes:
@@ -232,7 +242,9 @@ services:
       - "${HTTP_PORT:-80}:80"
       - "${HTTPS_PORT:-443}:443"
     volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      # Default: plain HTTP, no certificates required. Enable the `tls` profile
+      # (NGINX_CONF=nginx-tls.conf via COMPOSE_FILE or -e) once certs exist.
+      - ./nginx/${NGINX_CONF:-nginx.conf}:/etc/nginx/nginx.conf:ro
       - ./nginx/certs:/etc/nginx/certs:ro
     depends_on:
       api:
@@ -242,6 +254,11 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   pgdata:

@@ -94,20 +94,25 @@ export MINIO_SECRET_KEY=... CORS_ORIGINS=https://attendance.example.com
 docker compose up -d --build
 ```
 
-The stack starts Postgres, Redis, MinIO, the migration job, the API (4 workers),
-a Celery worker pool, Celery beat, and nginx. TLS certificates drop into
-`deployment/nginx/certs/{fullchain.pem,privkey.pem}` and the commented blocks in
-`nginx.conf` are marked `[tls-only]`.
+The stack starts Postgres, Redis, MinIO, the migration job (which the API now
+waits for), the API (`API_WORKERS`, default 4), a Celery worker pool, Celery
+beat, and nginx. nginx serves plain HTTP by default so the stack comes up
+without certificates; to enable TLS, drop `fullchain.pem`/`privkey.pem` into
+`deployment/nginx/certs/` and start nginx with `NGINX_CONF=nginx-tls.conf`
+(see `docs/deployment.md`).
 
 Production guardrails (the process refuses to start otherwise):
 - explicit `JWT_SECRET` ≥ 32 chars
 - `DEBUG=false`, no wildcard CORS origins
+- `CORS_ORIGINS` entries must include a scheme (`https://app.example.com`)
 
 ## Security model
 
 - **JWT access tokens** (30 min default) + **refresh tokens with rotation**:
   every refresh invalidates the presented token; replaying a rotated token
-  revokes all of that user's sessions (theft detection). Logout revokes server-side.
+  revokes all of that user's sessions (theft detection). Logout, password
+  change and admin resets bump `users.token_version`, which invalidates every
+  outstanding access token immediately — not just the refresh token.
 - **Password reset**: one-time hashed tokens stored in `password_reset_tokens`,
   delivered by SMTP email only — never returned in HTTP responses.
 - **API keys**: HMAC-hashed at rest, scoped (`recognition:write`,
@@ -124,12 +129,20 @@ Production guardrails (the process refuses to start otherwise):
 
 ```
 POST /api/recognize  (Bearer user or X-API-Key)
-  base64 image → MTCNN detect+crop → quality gate (optional)
-  → liveness check (blink/movement/texture) → spoof attempt logged if failed
+  base64 frame → MTCNN detect → 160x160 RGB uint8 crop
+  → liveness (LBP texture now; blink/head-movement from liveness_frames_base64)
+  → spoof attempt recorded and request short-circuited if not live
   → ONNX embedding (512-d, L2-normalized)
   → cosine match against the caller's organization index only
   → optional auto-marking of attendance with dedupe window
 ```
+
+Enrollment is separate: `POST /api/recognize/users/{id}/register` takes 3–5
+frames, quality-gates each one (sharpness, brightness, contrast, face size),
+averages the surviving embeddings and stores the L2-normalized mean.
+
+Thresholds come from the caller's organization settings (falling back to global
+defaults) and are floored at `MATCH_THRESHOLD_FLOOR`.
 
 Indexes live in memory per organization (`MatcherRegistry`), warm up at startup,
 update instantly on registration/deactivation, and rebuild periodically via beat.
@@ -163,19 +176,52 @@ exports it to ONNX. Jobs run on the dedicated `training` queue.
 ## Quality gates
 
 ```bash
-ruff check src scripts
-ruff format --check src scripts
+ruff check src scripts tests
+ruff format --check src scripts tests
+pytest tests -m "not ml"          # fast suite: no model/torch needed
+pytest tests                       # full suite incl. ONNX + MediaPipe
 ```
 
-CI (`.github/workflows/ci.yml`) runs lint and format checks and builds both
-Docker images on push.
+CI (`.github/workflows/ci.yml`) runs lint, the test suite, a strict
+`tsc --noEmit` + Vite build of the dashboard, and builds all three Docker
+images on push.
+
+Requires the exported model for the ML tests:
+`python scripts/export_pretrained_onnx.py --validate`. Without it those tests
+skip rather than fail.
+
+## Recognition request shape
+
+`POST /api/recognize` accepts a primary frame plus an optional short burst used
+for the temporal liveness checks:
+
+```json
+{
+  "image_base64": "<primary frame>",
+  "liveness_frames_base64": ["<frame 2>", "<frame 3>"],
+  "check_liveness": true,
+  "auto_mark_attendance": false
+}
+```
+
+Blink and head-movement cannot be measured from one frame, so a single-frame
+request is scored on static texture alone and reports
+`liveness_details: "static_only..."`. Set `SPOOF_REQUIRE_SEQUENCE=true` to
+reject single-frame requests outright. Thresholds are read per organization
+from the dashboard settings page; the recognition threshold can never be
+lowered below `MATCH_THRESHOLD_FLOOR`.
 
 ## Honest limitations
 
-- **Liveness is heuristic** (EAR blink, nose movement, LBP texture). It raises
-  the bar against photo/replay attacks but is not PAD-certified. For hostile
+- **Liveness is heuristic** (LBP texture, blink, head movement). It raises the
+  bar against photo/replay attacks but is not PAD-certified. For hostile
   environments add an IR/depth sensor path.
+- **Single-frame liveness is texture-only.** Blink and movement need a frame
+  burst; without one, only static texture is judged.
 - **Embeddings are global per org**, not per device; threshold calibration
   should be re-checked when lighting/camera fleets change materially.
 - **Fine-tuning needs data discipline**: ≥2 identities × ≥4 photos to start,
   realistically dozens of identities for measurable gains over VGGFace2 base.
+- **Access tokens are revocable via `users.token_version`.** Logout, password
+  change and admin reset bump it, so outstanding tokens fail immediately.
+

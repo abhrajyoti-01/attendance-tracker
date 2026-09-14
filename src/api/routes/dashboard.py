@@ -9,7 +9,11 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.dependencies import get_current_user, get_org_admin_user
+from src.api.dependencies import (
+    get_current_user,
+    get_org_admin_user,
+    get_org_admin_user_short_lived,
+)
 from src.api.schemas.dashboard import (
     AttendanceFeedEvent,
     DailyAttendanceChartResponse,
@@ -245,7 +249,7 @@ async def get_attendance_feed(
     )
     rows = (await db.execute(q)).all()
 
-    dept_ids = {row[5] for row in rows if row[3]}
+    dept_ids = {row[3] for row in rows if row[3]}
     dept_names: dict[UUID, str] = {}
     if dept_ids:
         dept_rows = (
@@ -386,12 +390,15 @@ async def _enrich_live_event(raw: str) -> str | None:
 @router.get("/stream", summary="Live attendance event stream (Server-Sent Events)")
 async def stream_attendance_events(
     request: Request,
-    current_user: User = Depends(get_org_admin_user),
+    current_user: User = Depends(get_org_admin_user_short_lived),
 ):
     """Stream real-time attendance events for the caller's organization.
 
     Admin-only. Emits `data:` JSON events matching the /feed shape plus a
     heartbeat comment every SSE_HEARTBEAT_SECONDS to survive idle proxies.
+
+    Uses the short-lived auth dependency so no pooled DB connection is pinned
+    for the lifetime of the stream.
     """
     if not settings.features.enable_live_feed:
         raise HTTPException(status_code=404, detail="Live feed is disabled")

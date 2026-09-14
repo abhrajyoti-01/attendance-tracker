@@ -62,7 +62,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         window_epoch = int(time.time() // WINDOW_SECONDS)
         counter_key = f"ratelimit:{scope}:{client_ip}:{window_epoch}"
 
-        count, retry_after = await self._incr(counter_key)
+        count = await self._incr(request, counter_key)
         headers = {
             "X-RateLimit-Limit": str(limit),
             "X-RateLimit-Remaining": str(max(0, limit - count)),
@@ -87,18 +87,21 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             response.headers.setdefault(header, value)
         return response
 
-    async def _incr(self, key: str) -> tuple[int, int]:
-        redis = getattr(self.app.state, "redis", None) if hasattr(self.app, "state") else None
+    async def _incr(self, request: Request, key: str) -> int:
+        # scope["app"] is always the FastAPI instance. `self.app` is the *inner*
+        # middleware (add_middleware composes in reverse) and has no .state.
+        app = request.scope.get("app")
+        redis = getattr(getattr(app, "state", None), "redis", None)
         if redis is not None:
             try:
                 pipe = redis.pipeline()
                 pipe.incr(key)
                 pipe.expire(key, WINDOW_SECONDS + 5)
                 count = (await pipe.execute())[0]
-                return int(count), 0
+                return int(count)
             except Exception as exc:
                 logger.debug("Redis rate limit unavailable; using memory", error=str(exc))
-        return self._memory.incr(key), 0
+        return self._memory.incr(key)
 
 
 def client_ip_from_request(request: Request) -> str:

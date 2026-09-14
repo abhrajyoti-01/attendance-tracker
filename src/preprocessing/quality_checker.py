@@ -6,13 +6,15 @@ class QualityChecker:
     def __init__(
         self,
         min_face_size: int = 40,
-        max_blur_threshold: float = 100.0,
+        min_sharpness: float = 12.0,
         min_brightness: int = 50,
         max_brightness: int = 200,
         min_contrast: float = 30.0,
     ):
         self.min_face_size = min_face_size
-        self.max_blur_threshold = max_blur_threshold
+        # Laplacian variance measures *sharpness*: higher is better. Blurred
+        # crops score low, so this is a floor, not a ceiling.
+        self.min_sharpness = min_sharpness
         self.min_brightness = min_brightness
         self.max_brightness = max_brightness
         self.min_contrast = min_contrast
@@ -33,11 +35,12 @@ class QualityChecker:
             results["face_size"] = False
             results["valid"] = False
 
-        blur_score = self._check_blur(image)
-        if blur_score > self.max_blur_threshold:
+        sharpness_score = self._check_blur(image)
+        if sharpness_score < self.min_sharpness:
             results["blur"] = False
             results["valid"] = False
-        results["blur_score"] = blur_score
+        results["blur_score"] = sharpness_score
+        results["sharpness_score"] = sharpness_score
 
         brightness_score = self._check_brightness(image)
         if not (self.min_brightness <= brightness_score <= self.max_brightness):
@@ -65,7 +68,7 @@ class QualityChecker:
 
     def _check_blur(self, image: np.ndarray) -> float:
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        return cv2.Laplacian(gray, cv2.CV_64F).var()
+        return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
     def _check_brightness(self, image: np.ndarray) -> float:
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)

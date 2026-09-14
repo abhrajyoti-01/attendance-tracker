@@ -34,9 +34,24 @@ python scripts/export_pretrained_onnx.py --validate
 # alternatively mount a shared volume at /app/models (compose uses models_data volume)
 ```
 
-3. **TLS** — place `fullchain.pem` + `privkey.pem` in `deployment/nginx/certs/`
-and uncomment the `[tls-only]` blocks in `deployment/nginx/nginx.conf`.
-Until then nginx serves plain HTTP and only `/healthz` plus proxied traffic.
+3. **TLS** — certificates are opt-in via a separate nginx config, so the stack
+   starts on plain HTTP without them:
+
+```bash
+# 1. Place certificates where the nginx container already mounts them:
+#      deployment/nginx/certs/fullchain.pem
+#      deployment/nginx/certs/privkey.pem
+# 2. Switch nginx to the TLS server block (port 80 redirects to 443,
+#    except /healthz which orchestrators poll directly):
+cd deployment
+NGINX_CONF=nginx-tls.conf docker compose up -d nginx
+```
+
+`deployment/nginx/nginx-tls.conf` is a complete drop-in replacement for
+`nginx.conf` that adds `ssl_certificate` directives, TLS 1.2/1.3, OCSP
+stapling and HSTS. Without certificates, nginx exits with
+"no ssl_certificate is defined", so do not point `NGINX_CONF` at it until the
+files exist.
 
 ## Bring-up
 
@@ -57,7 +72,7 @@ profile so GPU resources are only pulled when requested.
 | --- | --- | --- |
 | postgres | 1g | working set |
 | redis | 768m | rate-limit counters + celery results |
-| api | 4g | 4 uvicorn workers × ONNX sessions |
+| api | 4g | `${API_WORKERS:-4}` uvicorn workers × ONNX sessions |
 | worker | 4g | detection+embedding concurrency 2 |
 | trainer | 8g | batch-hard mining peak |
 
@@ -89,14 +104,20 @@ profile so GPU resources are only pulled when requested.
 
 ## Production checklist
 
-- [ ] Secrets exported; no defaults anywhere (`grep TODO .env`)
-- [ ] TLS certificates mounted; HTTP→HTTPS redirect enabled
+- [ ] Secrets exported; no defaults anywhere
+- [ ] TLS certificates mounted and nginx switched to `nginx-tls.conf`
 - [ ] `alembic current` matches head inside the api container
 - [ ] Bootstrap executed once: superadmin exists, default password rotated
 - [ ] SMTP configured (password reset depends on it)
+- [ ] `MINIO_*` set and the worker has logged bucket provisioning (async exports
+      fail with `NoSuchBucket` otherwise)
+- [ ] `CORS_ORIGINS` lists your dashboard origin, comma-separated
+      (e.g. `https://attendance.example.com`) — a bare hostname without a
+      scheme is rejected at startup
 - [ ] Backups: `pgdata`, `miniodata` volumes scheduled
 - [ ] Prometheus scraping + alert delivery verified
-- [ ] `GET /health` shows `database: ok` and non-zero indexed users
+- [ ] `GET /health` shows `database: ok`; `indexed_users` grows after registering
+      faces
 
 ## Manual (non-Docker) setup
 

@@ -1,8 +1,8 @@
 # Database Schema
 
-13 tables. Managed exclusively through Alembic (`migrations/`, baseline
-`0001_baseline`). The API verifies at startup that the applied revision matches
-the current head and refuses to serve otherwise.
+13 tables. Managed exclusively through Alembic (`migrations/`; `0001_baseline`
+then `0002_token_version`). The API verifies at startup that the applied
+revision matches the current head and refuses to serve otherwise.
 
 All timestamps are `timestamptz` (UTC). UUID primary keys throughout.
 `organizations` cascades to all tenant-owned rows; `users.id` references use
@@ -37,6 +37,7 @@ Unique `(organization_id, name)`.
 | role | varchar(50) | `superadmin` \| `org_admin` \| `member` (validated in schemas) |
 | password_hash | text NULL | bcrypt; NULL = cannot sign in until set |
 | is_active | bool | deactivation revokes matcher entry |
+| token_version | int NOT NULL default 0 | bumped on logout/password change; access tokens carry it and stale ones are rejected |
 | metadata | json | renamed attribute `metadata_` (SQLAlchemy reserves `.metadata`) |
 
 ## embeddings
@@ -57,8 +58,13 @@ incompatible rows (logged), so swapping models never crashes recognition.
 
 ## face_images
 
-Optional provenance for registration samples: `storage_key`, `quality_score`,
-optional embedding bytes, `captured_at`.
+Reserved provenance table for registration samples (`storage_key`,
+`quality_score`, optional embedding bytes, `captured_at`).
+
+> **Not currently written.** Face crops are processed in memory and discarded;
+> only the aggregated embedding is persisted. MinIO holds attendance export
+> files, not face images. This table exists for a future image-retention
+> feature.
 
 ## attendance
 
@@ -69,12 +75,16 @@ excluded from presence counts. Duplicate suppression uses a rolling window
 
 ## spoof_attempts
 
-Liveness failures: reason, liveness score, optional snapshot key.
+Liveness failures: reason, liveness score, optional snapshot key. The snapshot
+column is reserved and currently always NULL (no image bytes are stored).
+Purged after 90 days by the `purge_old_spoof_attempts_task` beat job.
 
 ## audit_log
 
 Append-only security trail: action, actor, target type/id, details JSON,
-source IP. Written atomically with the triggering transaction where possible.
+source IP. The request-scoped session commits on clean exit, so audit rows
+written by a handler are persisted even when the handler does not commit
+explicitly.
 
 ## api_keys
 

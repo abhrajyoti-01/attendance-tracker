@@ -14,6 +14,43 @@ from src.utils.security import hash_api_key, verify_token
 bearer_scheme = HTTPBearer(auto_error=False)
 
 
+async def get_current_user_short_lived(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+) -> User:
+    """Authenticate with a session that is closed before the response is sent.
+
+    FastAPI tears request-scoped dependencies down only after a streaming
+    response finishes, so depending on ``get_db`` for SSE holds a pooled
+    connection for the whole connection lifetime. This variant performs the
+    lookup in its own session and returns a detached user, freeing the
+    connection immediately.
+    """
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    from src.database.session import get_db_context
+
+    async with get_db_context() as db:
+        user = await _resolve_active_user(credentials.credentials, db)
+        db.expunge(user)
+        return user
+
+
+async def get_org_admin_user_short_lived(
+    current_user: User = Depends(get_current_user_short_lived),
+) -> User:
+    """Admin-gated variant of :func:`get_current_user_short_lived` for SSE."""
+    if not current_user.is_org_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Organization admin privileges required",
+        )
+    return current_user
+
+
 class RequesterContext:
     """Unified identity for either an authenticated user or an API key."""
 
@@ -75,6 +112,14 @@ async def _resolve_active_user(token: str, db: AsyncSession) -> User:
     if user is None or not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or inactive"
+        )
+    # Tokens minted before the last logout/password change carry an older
+    # token_version and must not be honoured.
+    if int(payload.get("tv", 0)) != int(user.token_version or 0):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has been revoked",
+            headers={"WWW-Authenticate": "Bearer"},
         )
     return user
 
