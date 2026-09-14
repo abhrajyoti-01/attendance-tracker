@@ -129,7 +129,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 app = FastAPI(
     title="Attendance Tracker API",
-    description="Production-grade face recognition attendance system",
+    description="Multi-tenant face recognition attendance system",
     version="1.0.0",
     lifespan=lifespan,
     docs_url="/docs" if not settings.is_production else settings.security.docs_url_in_production,

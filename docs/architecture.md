@@ -2,7 +2,7 @@
 
 ## System Overview
 
-The Attendance Tracker is a multi-tenant, production-grade face recognition attendance system designed for organizations with 5,000 to 50,000+ users.
+The Attendance Tracker is a multi-tenant face recognition attendance system designed for organizations with 5,000 to 50,000+ users.
 
 ```
                          Nginx Reverse Proxy

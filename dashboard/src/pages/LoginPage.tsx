@@ -46,13 +46,13 @@ export function LoginPage() {
       <section className="login-brand">
         <span className="brand-mark" aria-hidden />
         <h2>
-          Face recognition attendance,
+          Face recognition attendance
           <br />
-          built for scale.
+          for your organization.
         </h2>
         <p>
-          Multi-tenant attendance tracking with kiosk-ready recognition, audit trails, and
-          operational tooling out of the box.
+          Attendance tracking with liveness anti-spoofing, audit trails and an
+          operations dashboard.
         </p>
         <ul className="feature-list">
           {FEATURES.map((feature) => (

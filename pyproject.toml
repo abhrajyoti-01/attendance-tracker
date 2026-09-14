@@ -1,7 +1,7 @@
 [project]
 name = "attendance-tracker"
 version = "1.0.0"
-description = "Production-grade face recognition attendance system"
+description = "Multi-tenant face recognition attendance system"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Abhra", url = "https://github.com/abhrajyoti-01" }]
 requires-python = ">=3.11"

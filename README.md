@@ -6,7 +6,7 @@
 [![Python](https://img.shields.io/badge/python-3.11-blue)](https://www.python.org/)
 [![Tests](https://img.shields.io/badge/tests-69%20passing-brightgreen)](tests/)
 
-Production-grade, multi-tenant face recognition attendance system.
+Multi-tenant face recognition attendance system.
 
 FastAPI · SQLAlchemy 2 (async) · PostgreSQL · Redis · Celery · ONNX Runtime (FaceNet) · React + TypeScript · Docker
 
