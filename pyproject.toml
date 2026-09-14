@@ -53,6 +53,9 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Put the repo root on sys.path so `import src` works when pytest is invoked as
+# the bare `pytest` executable (as CI does), not just `python -m pytest`.
+pythonpath = ["."]
 asyncio_mode = "auto"
 filterwarnings = ["ignore::DeprecationWarning:passlib.*"]
 markers = ["ml: requires the exported ONNX model / torch / MediaPipe"]

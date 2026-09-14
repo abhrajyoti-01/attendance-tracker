@@ -17,15 +17,29 @@ if TYPE_CHECKING:
 
 MIGRATIONS_DIR = BASE_DIR / "migrations"
 
-engine = create_async_engine(
-    settings.database.url,
-    pool_size=settings.database.pool_size,
-    max_overflow=settings.database.max_overflow,
-    echo=settings.database.echo,
-    pool_pre_ping=True,
-    pool_recycle=1800,
-    connect_args={"timeout": settings.database.command_timeout},
-)
+
+def _engine_kwargs(url: str) -> dict:
+    """Build create_async_engine kwargs appropriate for the target dialect.
+
+    SQLite (used by the test suite and quick local runs) rejects the Postgres
+    pool sizing arguments and uses StaticPool, so passing them raises
+    TypeError at import time.
+    """
+    kwargs: dict = {"echo": settings.database.echo}
+    if url.startswith("sqlite"):
+        kwargs["connect_args"] = {"check_same_thread": False}
+        return kwargs
+    kwargs.update(
+        pool_size=settings.database.pool_size,
+        max_overflow=settings.database.max_overflow,
+        pool_pre_ping=True,
+        pool_recycle=1800,
+        connect_args={"timeout": settings.database.command_timeout},
+    )
+    return kwargs
+
+
+engine = create_async_engine(settings.database.url, **_engine_kwargs(settings.database.url))
 
 async_session_maker = async_sessionmaker(
     engine,
